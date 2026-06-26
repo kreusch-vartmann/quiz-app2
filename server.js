@@ -335,7 +335,21 @@ app.post('/api/games/:gameId/import-csv', requireAdmin, upload.single('csvfile')
 // ── Spielhistorie ─────────────────────────────────────────────────────────────
 app.get('/api/history', requireAdmin, async (_req, res) => {
   try {
-    const history = await dbAll('SELECT * FROM game_history ORDER BY played_at DESC LIMIT 50');
+    const rows = await dbAll('SELECT * FROM game_history ORDER BY played_at DESC LIMIT 50');
+    const history = rows.map(row => {
+      const leaderboard = row.results_json ? JSON.parse(row.results_json) : [];
+      return {
+        id:              row.id,
+        game_id:         row.game_id,
+        game_title:      row.game_title,
+        played_at:       row.played_at,
+        player_count:    row.player_count,
+        winner_nickname: row.winner_nickname,
+        winner_score:    row.winner_score,
+        has_history:     !!row.history_json,
+        leaderboard,
+      };
+    });
     res.json(history);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -364,6 +378,111 @@ app.get('/api/admin/stats/:historyId', requireAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error('[API] GET /api/admin/stats/:historyId:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── CSV-Export einer abgeschlossenen Spielrunde ───────────────────────────────
+app.get('/api/admin/history/export/:historyId', requireAdmin, async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM game_history WHERE id = ?', [req.params.historyId]);
+    if (!row) return res.status(404).json({ error: 'Kein Eintrag mit dieser ID gefunden.' });
+
+    const leaderboard     = row.results_json ? JSON.parse(row.results_json) : [];
+    const questionHistory = row.history_json ? JSON.parse(row.history_json) : [];
+
+    // Hilfsfunktion: Wert für CSV escapen
+    const csvCell = (v) => {
+      const s = v == null ? '' : String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const csvRow = (...cells) => cells.map(csvCell).join(',') + '\r\n';
+
+    const safeTitle = (row.game_title || 'spielrunde').replace(/[^a-z0-9_\-]/gi, '_');
+    const safeDate  = (row.played_at || '').replace(/[^0-9\-]/g, '_').slice(0, 10);
+    const filename  = `quiz_${safeTitle}_${safeDate}.csv`;
+
+    let csv = '\uFEFF'; // UTF-8 BOM für Excel
+
+    // ── Sektion 1: Metadaten ──────────────────────────────────────────────────
+    csv += csvRow('Quiz', row.game_title || '');
+    csv += csvRow('Datum', row.played_at || '');
+    csv += csvRow('Teilnehmer', row.player_count || 0);
+    csv += csvRow('Gewinner', row.winner_nickname || '–');
+    csv += csvRow('Gewinner-Punkte', row.winner_score || 0);
+    csv += '\r\n';
+
+    // ── Sektion 2: Leaderboard ────────────────────────────────────────────────
+    csv += csvRow('LEADERBOARD');
+    csv += csvRow('Rang', 'Nickname', 'Punkte');
+    for (const entry of leaderboard) {
+      csv += csvRow(entry.rank, entry.nickname, entry.score);
+    }
+    csv += '\r\n';
+
+    // ── Sektion 3: Fragen-Analyse ─────────────────────────────────────────────
+    csv += csvRow('FRAGEN-ANALYSE');
+    if (questionHistory.length === 0) {
+      csv += csvRow('Keine Fragendaten verfügbar.');
+    } else {
+      // Alle Spielernamen für die Spalten ermitteln
+      const playerNames = leaderboard.map(e => e.nickname);
+
+      csv += csvRow(
+        'Frage-Nr', 'Fragetext', 'Korrekte Antwort',
+        'Option A (Anzahl)', 'Option B (Anzahl)', 'Option C (Anzahl)', 'Option D (Anzahl)',
+        'Richtig', 'Falsch', 'Keine Antwort',
+        ...playerNames.map(n => `${n} (Antwort)`),
+        ...playerNames.map(n => `${n} (Punkte)`)
+      );
+
+      for (let i = 0; i < questionHistory.length; i++) {
+        const q = questionHistory[i];
+        const results = q.results || {};
+
+        // Antwortverteilung berechnen
+        const counts = { a: 0, b: 0, c: 0, d: 0 };
+        let correct = 0, wrong = 0, noAnswer = 0;
+        for (const name of playerNames) {
+          const r = results[name];
+          if (!r || r.answer == null) { noAnswer++; continue; }
+          const ans = r.answer.toLowerCase();
+          if (counts[ans] !== undefined) counts[ans]++;
+          if (r.correct) correct++; else wrong++;
+        }
+
+        csv += csvRow(
+          i + 1,
+          q.questionText || '',
+          (q.correctAnswer || '').toUpperCase(),
+          counts.a, counts.b, counts.c, counts.d,
+          correct, wrong, noAnswer,
+          ...playerNames.map(n => results[n]?.answer?.toUpperCase() ?? '–'),
+          ...playerNames.map(n => results[n]?.points ?? 0)
+        );
+      }
+    }
+    csv += '\r\n';
+
+    // ── Sektion 4: Teilnehmer-Analyse ─────────────────────────────────────────
+    csv += csvRow('TEILNEHMER-ANALYSE');
+    if (questionHistory.length === 0 || leaderboard.length === 0) {
+      csv += csvRow('Keine Teilnehmerdaten verfügbar.');
+    } else {
+      csv += csvRow('Nickname', ...questionHistory.map((_, i) => `Frage ${i + 1}`), 'Gesamt');
+      for (const entry of leaderboard) {
+        const name = entry.nickname;
+        const pointsPerQuestion = questionHistory.map(q => q.results?.[name]?.points ?? 0);
+        csv += csvRow(name, ...pointsPerQuestion, entry.score);
+      }
+    }
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (err) {
+    console.error('[API] GET /api/admin/history/export/:historyId:', err);
     res.status(500).json({ error: err.message });
   }
 });

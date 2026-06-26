@@ -481,8 +481,9 @@
 
   <!-- Tab-Navigation -->
   <div class="flex gap-2 mb-6 overflow-x-auto pb-1">
-    <button id="tab-btn-games"   onclick="switchTab('games')"   class="tab-btn active-tab flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all">📚 Quizze</button>
-    <button id="tab-btn-host"    onclick="switchTab('host')"    class="tab-btn flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all text-white/60">🎙️ Live-Host</button>
+    <button id="tab-btn-games"   onclick="switchTab('games')"      class="tab-btn active-tab flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all">📚 Quizze</button>
+    <button id="tab-btn-host"    onclick="switchTab('host')"       class="tab-btn flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all text-white/60">🎙️ Live-Host</button>
+    <button id="tab-btn-stats"   onclick="switchTab('stats')"      class="tab-btn flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all text-white/60">📊 Statistik</button>
   </div>
 
   <!-- Tab: Quizze verwalten -->
@@ -500,6 +501,63 @@
     <!-- Quiz-Liste -->
     <div id="games-list" class="space-y-4">
       <div class="text-center text-white/40 py-8">Lade Quizze<span class="waiting-dots"></span></div>
+    </div>
+  </div>
+
+  <!-- Tab: Statistik -->
+  <div id="tab-stats" class="hidden space-y-6">
+
+    <!-- Übersichtstabelle -->
+    <div class="glass p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold">📋 Vergangene Runden</h2>
+        <span class="text-white/40 text-sm" id="stats-round-count"></span>
+      </div>
+      <div id="stats-overview" class="space-y-3">
+        <div class="text-white/40 text-center py-8">Lade Statistiken<span class="waiting-dots"></span></div>
+      </div>
+    </div>
+
+    <!-- Detailansicht (wird eingeblendet) -->
+    <div id="stats-detail" class="hidden glass p-6 animate-slide-up">
+      <div class="flex items-center justify-between mb-5">
+        <div>
+          <h2 id="stats-detail-title" class="text-lg font-bold">–</h2>
+          <p id="stats-detail-meta" class="text-white/50 text-sm mt-0.5">–</p>
+        </div>
+        <div class="flex gap-2">
+          <button id="stats-export-btn" onclick="exportStatsCSV()" class="btn-success text-sm">⬇️ CSV Export</button>
+          <button onclick="closeStatsDetail()" class="btn-secondary text-sm">✕ Schließen</button>
+        </div>
+      </div>
+
+      <!-- Unternavigation Detailansicht -->
+      <div class="flex gap-2 mb-5 overflow-x-auto pb-1">
+        <button id="detail-tab-btn-leaderboard" onclick="switchDetailTab('leaderboard')" class="detail-tab-btn flex-shrink-0 px-3 py-1.5 rounded-lg font-semibold text-sm transition-all">🏆 Leaderboard</button>
+        <button id="detail-tab-btn-questions"   onclick="switchDetailTab('questions')"   class="detail-tab-btn flex-shrink-0 px-3 py-1.5 rounded-lg font-semibold text-sm transition-all text-white/60">❓ Fragen-Analyse</button>
+        <button id="detail-tab-btn-players"     onclick="switchDetailTab('players')"     class="detail-tab-btn flex-shrink-0 px-3 py-1.5 rounded-lg font-semibold text-sm transition-all text-white/60">👥 Teilnehmer</button>
+      </div>
+
+      <!-- Detail: Leaderboard -->
+      <div id="detail-tab-leaderboard">
+        <div id="stats-leaderboard-content" class="space-y-2">
+          <div class="text-white/40 text-center py-4">Lade…</div>
+        </div>
+      </div>
+
+      <!-- Detail: Fragen-Analyse -->
+      <div id="detail-tab-questions" class="hidden">
+        <div id="stats-questions-content" class="space-y-4">
+          <div class="text-white/40 text-center py-4">Lade…</div>
+        </div>
+      </div>
+
+      <!-- Detail: Teilnehmer-Analyse -->
+      <div id="detail-tab-players" class="hidden">
+        <div id="stats-players-content" class="overflow-x-auto">
+          <div class="text-white/40 text-center py-4">Lade…</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -582,6 +640,7 @@
       </div>
     </div>
   </div>
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
@@ -897,7 +956,7 @@
       <p class="text-white/50 text-xs uppercase tracking-widest mb-2">Erklärung</p>
       <p id="pr-explanation-text" class="text-white/90 text-sm leading-relaxed"></p>
     </div>
-    <p class="text-center text-white/40 text-sm mt-5 waiting-dots">Warte auf die Rangliste</p>
+    <p class="text-center text-white/40 text-sm mt-5 waiting-dots">Warte auf die nächste Frage</p>
   </div>
 </div>
 
@@ -1268,9 +1327,11 @@ function switchTab(tab) {
 
   document.getElementById('tab-games').classList.add('hidden');
   document.getElementById('tab-host').classList.add('hidden');
+  document.getElementById('tab-stats').classList.add('hidden');
   document.getElementById(`tab-${tab}`).classList.remove('hidden');
 
   if (tab === 'host') loadHostGameSelect();
+  if (tab === 'stats') loadStatsOverview();
 }
 
 // Initiales Tab-Styling
@@ -1572,6 +1633,207 @@ async function showHistory() {
 
 function closeHistoryModal() {
   document.getElementById('history-modal').classList.add('hidden');
+}
+
+// ── Statistik-Tab ─────────────────────────────────────────────────────────────
+
+let statsCurrentHistoryId = null;
+
+async function loadStatsOverview() {
+  const container = document.getElementById('stats-overview');
+  const countEl   = document.getElementById('stats-round-count');
+  container.innerHTML = '<div class="text-white/40 text-center py-8">Lade<span class="waiting-dots"></span></div>';
+  closeStatsDetail();
+  try {
+    const history = await api('GET', '/api/history');
+    if (history.length === 0) {
+      countEl.textContent = '0 Runden';
+      container.innerHTML = '<div class="text-white/40 text-center py-8">Noch keine gespielten Runden.</div>';
+      return;
+    }
+    countEl.textContent = `${history.length} Runde(n)`;
+    container.innerHTML = `
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-white/40 text-xs border-b border-white/10">
+              <th class="text-left pb-2 pr-3">Quiz</th>
+              <th class="text-left pb-2 pr-3">Datum</th>
+              <th class="text-center pb-2 pr-3">Spieler</th>
+              <th class="text-left pb-2 pr-3">Gewinner</th>
+              <th class="text-right pb-2 pr-3">Punkte</th>
+              <th class="pb-2"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-white/5">
+            ${history.map(h => `
+              <tr class="hover:bg-white/5 transition-colors">
+                <td class="py-3 pr-3 font-semibold">${esc(h.game_title || '–')}</td>
+                <td class="py-3 pr-3 text-white/60">${new Date(h.played_at).toLocaleString('de-DE', { dateStyle:'short', timeStyle:'short' })}</td>
+                <td class="py-3 pr-3 text-center text-white/70">${h.player_count}</td>
+                <td class="py-3 pr-3 text-yellow-400 font-bold">${esc(h.winner_nickname || '–')}</td>
+                <td class="py-3 pr-3 text-right text-white/70">${h.winner_score ?? '–'}</td>
+                <td class="py-3 text-right">
+                  <button onclick="loadStatsDetail(${h.id})" class="btn-secondary text-xs px-2 py-1">Details</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  } catch (err) {
+    container.innerHTML = `<div class="text-red-400 text-center py-4">Fehler: ${esc(err.message)}</div>`;
+  }
+}
+
+async function loadStatsDetail(historyId) {
+  statsCurrentHistoryId = historyId;
+  const detail = document.getElementById('stats-detail');
+  detail.classList.remove('hidden');
+  detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  document.getElementById('stats-detail-title').textContent = 'Lade…';
+  document.getElementById('stats-detail-meta').textContent = '';
+  document.getElementById('stats-leaderboard-content').innerHTML = '<div class="text-white/40 text-center py-4">Lade…</div>';
+  document.getElementById('stats-questions-content').innerHTML   = '<div class="text-white/40 text-center py-4">Lade…</div>';
+  document.getElementById('stats-players-content').innerHTML     = '<div class="text-white/40 text-center py-4">Lade…</div>';
+
+  switchDetailTab('leaderboard');
+
+  try {
+    const d = await api('GET', `/api/admin/stats/${historyId}`);
+
+    document.getElementById('stats-detail-title').textContent =
+      d.game_title || 'Unbekanntes Quiz';
+    document.getElementById('stats-detail-meta').textContent =
+      `${new Date(d.played_at).toLocaleString('de-DE')} · ${d.player_count} Spieler:in(nen) · Gewinner: ${d.winner_nickname || '–'} (${d.winner_score} Pkt.)`;
+
+    // ── Leaderboard ───────────────────────────────────────────────────────────
+    const medals = ['🥇', '🥈', '🥉'];
+    const lbHtml = d.leaderboard.length === 0
+      ? '<div class="text-white/40 text-center py-4">Keine Daten verfügbar.</div>'
+      : d.leaderboard.map((e, i) => `
+          <div class="flex items-center gap-3 px-4 py-3 rounded-xl ${i === 0 ? 'rank-1 text-gray-900' : i === 1 ? 'rank-2 text-gray-900' : i === 2 ? 'rank-3 text-gray-900' : 'rank-other'}">
+            <span class="text-xl w-8 text-center flex-shrink-0">${medals[i] || `#${e.rank}`}</span>
+            <span class="font-bold flex-1">${esc(e.nickname)}</span>
+            <span class="font-black text-lg">${e.score} <span class="text-sm font-normal opacity-70">Pkt.</span></span>
+          </div>`).join('');
+    document.getElementById('stats-leaderboard-content').innerHTML = lbHtml;
+
+    // ── Fragen-Analyse ────────────────────────────────────────────────────────
+    const answerColors = { a: 'bg-red-500', b: 'bg-blue-500', c: 'bg-yellow-500', d: 'bg-green-600' };
+    const answerLabels = { a: 'A', b: 'B', c: 'C', d: 'D' };
+
+    if (d.questionHistory.length === 0) {
+      document.getElementById('stats-questions-content').innerHTML =
+        '<div class="text-white/40 text-center py-4">Keine Fragendaten verfügbar (ältere Runde).</div>';
+    } else {
+      const playerNames = d.leaderboard.map(e => e.nickname);
+      const qHtml = d.questionHistory.map((q, qi) => {
+        const results  = q.results || {};
+        const counts   = { a: 0, b: 0, c: 0, d: 0 };
+        let total = 0;
+        for (const name of playerNames) {
+          const r = results[name];
+          if (r && r.answer) { const ans = r.answer.toLowerCase(); if (counts[ans] !== undefined) { counts[ans]++; total++; } }
+        }
+        const correctKey = (q.correctAnswer || '').toLowerCase();
+
+        const bars = ['a','b','c','d'].map(opt => {
+          const count = counts[opt];
+          const pct   = total > 0 ? Math.round((count / total) * 100) : 0;
+          const isCorrect = opt === correctKey;
+          return `
+            <div class="flex items-center gap-2 text-xs">
+              <span class="w-5 h-5 rounded flex-shrink-0 flex items-center justify-center text-white font-bold text-xs ${answerColors[opt]}">${answerLabels[opt]}</span>
+              <div class="flex-1 bg-white/10 rounded-full h-2 overflow-hidden">
+                <div class="h-2 rounded-full ${isCorrect ? 'bg-green-400' : 'bg-white/40'}" style="width:${pct}%"></div>
+              </div>
+              <span class="w-8 text-right text-white/60">${count}</span>
+              ${isCorrect ? '<span class="text-green-400 text-xs">✓</span>' : '<span class="w-3"></span>'}
+            </div>`;
+        }).join('');
+
+        return `
+          <div class="bg-white/5 rounded-xl p-4">
+            <div class="flex items-start gap-3 mb-3">
+              <span class="flex-shrink-0 bg-brand-500/30 text-brand-500 font-black text-sm w-7 h-7 rounded-lg flex items-center justify-center">${qi + 1}</span>
+              <p class="font-semibold text-sm leading-snug">${esc(q.questionText || '–')}</p>
+            </div>
+            <div class="space-y-1.5">${bars}</div>
+            <p class="text-white/40 text-xs mt-2">Korrekte Antwort: <span class="text-green-400 font-bold">${(correctKey).toUpperCase()}</span></p>
+          </div>`;
+      }).join('');
+      document.getElementById('stats-questions-content').innerHTML = qHtml;
+    }
+
+    // ── Teilnehmer-Analyse ────────────────────────────────────────────────────
+    if (d.leaderboard.length === 0 || d.questionHistory.length === 0) {
+      document.getElementById('stats-players-content').innerHTML =
+        '<div class="text-white/40 text-center py-4">Keine Teilnehmerdaten verfügbar.</div>';
+    } else {
+      const playerNames = d.leaderboard.map(e => e.nickname);
+      const numQ = d.questionHistory.length;
+      let thead = '<thead><tr class="text-white/40 text-xs border-b border-white/10"><th class="text-left pb-2 pr-3 whitespace-nowrap">Teilnehmer</th>';
+      for (let i = 0; i < numQ; i++) thead += `<th class="text-center pb-2 px-1 whitespace-nowrap">F${i + 1}</th>`;
+      thead += '<th class="text-right pb-2 pl-3 whitespace-nowrap font-bold">Gesamt</th></tr></thead>';
+
+      const tbody = playerNames.map(name => {
+        const totalScore = d.leaderboard.find(e => e.nickname === name)?.score ?? 0;
+        let cells = '';
+        for (const q of d.questionHistory) {
+          const r = q.results?.[name];
+          if (!r || r.answer == null) {
+            cells += '<td class="text-center px-1 py-2 text-white/20 text-xs">–</td>';
+          } else if (r.correct) {
+            cells += `<td class="text-center px-1 py-2 text-green-400 font-bold text-xs">+${r.points}</td>`;
+          } else {
+            cells += '<td class="text-center px-1 py-2 text-red-400 text-xs">✗</td>';
+          }
+        }
+        return `<tr class="border-b border-white/5 hover:bg-white/5">
+          <td class="py-2 pr-3 font-semibold whitespace-nowrap">${esc(name)}</td>
+          ${cells}
+          <td class="py-2 pl-3 text-right font-black text-yellow-400 whitespace-nowrap">${totalScore}</td>
+        </tr>`;
+      }).join('');
+
+      document.getElementById('stats-players-content').innerHTML =
+        `<table class="w-full text-sm min-w-max">${thead}<tbody>${tbody}</tbody></table>`;
+    }
+  } catch (err) {
+    document.getElementById('stats-leaderboard-content').innerHTML =
+      `<div class="text-red-400 text-center py-4">Fehler: ${esc(err.message)}</div>`;
+  }
+}
+
+function closeStatsDetail() {
+  statsCurrentHistoryId = null;
+  document.getElementById('stats-detail').classList.add('hidden');
+}
+
+function switchDetailTab(tab) {
+  ['leaderboard', 'questions', 'players'].forEach(t => {
+    const btn  = document.getElementById(`detail-tab-btn-${t}`);
+    const pane = document.getElementById(`detail-tab-${t}`);
+    if (t === tab) {
+      btn.style.background = 'rgba(91,127,255,0.25)';
+      btn.style.color = '#fff';
+      btn.classList.remove('text-white/60');
+      pane.classList.remove('hidden');
+    } else {
+      btn.style.background = '';
+      btn.style.color = '';
+      btn.classList.add('text-white/60');
+      pane.classList.add('hidden');
+    }
+  });
+}
+
+function exportStatsCSV() {
+  if (!statsCurrentHistoryId) return;
+  window.open(`/api/admin/history/export/${statsCurrentHistoryId}`, '_blank');
 }
 
 // ── HOST: Raum erstellen ──────────────────────────────────────────────────────
