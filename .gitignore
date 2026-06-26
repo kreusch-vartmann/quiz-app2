@@ -1,0 +1,40 @@
+# Abhängigkeiten
+node_modules/
+
+# Umgebungsvariablen (enthält Secrets)
+.env
+
+# SQLite-Datenbankdateien (persistente Daten via Volume-Mount)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Betriebssystem-Dateien
+.DS_Store
+Thumbs.db
+
+# Editor-Dateien
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Build-Ausgabe
+dist/
+build/

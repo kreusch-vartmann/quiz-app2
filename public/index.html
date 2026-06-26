@@ -1,0 +1,1866 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>QuizLive – Echtzeit-Quiz-Plattform</title>
+  <meta name="description" content="QuizLive – interaktive Echtzeit-Quiz-Plattform für Gruppen. Spieler:innen treten mit Smartphones bei, der Host steuert das Spiel vom Laptop." />
+
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Fonts: Outfit (Modern, Spielerisch) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+
+  <!-- Socket.io Client (vom eigenen Server) -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Outfit', 'sans-serif'] },
+          colors: {
+            brand: {
+              50:  '#f0f4ff',
+              100: '#dce8ff',
+              500: '#5b7fff',
+              600: '#3d63f7',
+              700: '#2f52e3',
+              900: '#1a2a8a',
+            },
+          },
+          animation: {
+            'fade-in':    'fadeIn 0.4s ease-out',
+            'slide-up':   'slideUp 0.4s ease-out',
+            'pop':        'pop 0.3s ease-out',
+            'pulse-slow': 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite',
+          },
+          keyframes: {
+            fadeIn:  { from: { opacity: '0' },             to: { opacity: '1' } },
+            slideUp: { from: { opacity: '0', transform: 'translateY(20px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
+            pop:     { '0%': { transform: 'scale(0.8)', opacity: '0' }, '70%': { transform: 'scale(1.05)' }, '100%': { transform: 'scale(1)', opacity: '1' } },
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: #0f0f1a;
+      color: #f0f0ff;
+      min-height: 100vh;
+    }
+
+    /* ── Gradient-Hintergründe ──────────────────────────────── */
+    .bg-game   { background: linear-gradient(135deg, #0f0f1a 0%, #1a1a3e 50%, #0d1b2a 100%); }
+    .bg-reveal { background: linear-gradient(135deg, #0a1628 0%, #1a2a50 100%); }
+
+    /* ── Glassmorphism-Karte ────────────────────────────────── */
+    .glass {
+      background: rgba(255,255,255,0.07);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 1.25rem;
+    }
+    .glass-light {
+      background: rgba(255,255,255,0.92);
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 1.25rem;
+    }
+
+    /* ── Kahoot-Antwort-Buttons ────────────────────────────── */
+    .answer-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      padding: 1.25rem 1rem;
+      border-radius: 1rem;
+      font-size: 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+      border: none;
+      color: #fff;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.3s ease;
+      text-align: center;
+      min-height: 80px;
+      position: relative;
+      overflow: hidden;
+      letter-spacing: 0.01em;
+    }
+    .answer-btn::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 50%;
+      background: rgba(255,255,255,0.12);
+      border-radius: inherit;
+    }
+    .answer-btn:hover:not(:disabled) {
+      transform: translateY(-3px) scale(1.02);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+    }
+    .answer-btn:active:not(:disabled) {
+      transform: translateY(0) scale(0.98);
+    }
+    .answer-btn:disabled { cursor: not-allowed; }
+
+    .btn-a { background: linear-gradient(145deg, #e74c3c, #c0392b); box-shadow: 0 6px 20px rgba(231,76,60,0.4); }
+    .btn-b { background: linear-gradient(145deg, #3498db, #2980b9); box-shadow: 0 6px 20px rgba(52,152,219,0.4); }
+    .btn-c { background: linear-gradient(145deg, #f39c12, #d68910); box-shadow: 0 6px 20px rgba(243,156,18,0.4); }
+    .btn-d { background: linear-gradient(145deg, #27ae60, #1e8449); box-shadow: 0 6px 20px rgba(39,174,96,0.4); }
+
+    .btn-a.correct, .btn-b.correct, .btn-c.correct, .btn-d.correct {
+      box-shadow: 0 0 0 4px #fff, 0 0 30px rgba(255,255,255,0.5);
+      transform: scale(1.04);
+    }
+    .btn-a.wrong, .btn-b.wrong, .btn-c.wrong, .btn-d.wrong {
+      opacity: 0.35;
+      transform: scale(0.96);
+    }
+    .btn-a.selected-correct { background: linear-gradient(145deg, #2ecc71, #27ae60) !important; }
+    .btn-a.selected-wrong, .btn-b.selected-wrong,
+    .btn-c.selected-wrong, .btn-d.selected-wrong {
+      opacity: 0.5;
+    }
+
+    /* ── Timer-Ring ─────────────────────────────────────────── */
+    .timer-ring {
+      transition: stroke-dashoffset 1s linear;
+    }
+
+    /* ── Rangliste ──────────────────────────────────────────── */
+    .rank-1 { background: linear-gradient(135deg, #f6d365, #fda085); }
+    .rank-2 { background: linear-gradient(135deg, #a8edea, #fed6e3); }
+    .rank-3 { background: linear-gradient(135deg, #d299c2, #fef9d7); }
+    .rank-other { background: rgba(255,255,255,0.08); }
+
+    /* ── Formular ───────────────────────────────────────────── */
+    .form-input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border-radius: 0.75rem;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #f0f0ff;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .form-input:focus {
+      border-color: #5b7fff;
+      background: rgba(91,127,255,0.12);
+    }
+    .form-input::placeholder { color: rgba(255,255,255,0.35); }
+    .form-input option { background: #1a1a3e; color: #f0f0ff; }
+
+    .form-input-light {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border-radius: 0.75rem;
+      background: #fff;
+      border: 2px solid #e5e7eb;
+      color: #111827;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-input-light:focus { border-color: #3d63f7; }
+
+    /* ── Buttons ────────────────────────────────────────────── */
+    .btn-primary {
+      padding: 0.75rem 1.75rem;
+      border-radius: 0.875rem;
+      background: linear-gradient(135deg, #5b7fff, #3d63f7);
+      color: #fff;
+      font-weight: 700;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1rem;
+      border: none;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s;
+      box-shadow: 0 4px 15px rgba(91,127,255,0.4);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(91,127,255,0.5); }
+    .btn-primary:active { transform: translateY(0); }
+
+    .btn-secondary {
+      padding: 0.65rem 1.25rem;
+      border-radius: 0.75rem;
+      background: rgba(255,255,255,0.1);
+      color: #f0f0ff;
+      font-weight: 600;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.9rem;
+      border: 1px solid rgba(255,255,255,0.15);
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.18); }
+
+    .btn-danger {
+      padding: 0.5rem 1rem;
+      border-radius: 0.625rem;
+      background: linear-gradient(135deg, #e74c3c, #c0392b);
+      color: #fff;
+      font-weight: 600;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.85rem;
+      border: none;
+      cursor: pointer;
+      transition: transform 0.15s;
+    }
+    .btn-danger:hover { transform: scale(1.04); }
+
+    .btn-success {
+      padding: 0.65rem 1.25rem;
+      border-radius: 0.75rem;
+      background: linear-gradient(135deg, #27ae60, #1e8449);
+      color: #fff;
+      font-weight: 700;
+      font-family: 'Outfit', sans-serif;
+      font-size: 0.9rem;
+      border: none;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s;
+      box-shadow: 0 4px 12px rgba(39,174,96,0.35);
+    }
+    .btn-success:hover { transform: translateY(-2px); }
+
+    /* ── Animationen ────────────────────────────────────────── */
+    .animate-fade-in { animation: fadeIn 0.4s ease-out; }
+    .animate-slide-up { animation: slideUp 0.4s ease-out; }
+    .animate-pop { animation: pop 0.35s ease-out; }
+
+    @keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pop     { 0% { transform: scale(0.8); opacity: 0; } 70% { transform: scale(1.06); } 100% { transform: scale(1); opacity: 1; } }
+
+    /* ── Scrollbar ──────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+
+    /* ── Verstecken ─────────────────────────────────────────── */
+    [data-view]:not(.active) { display: none !important; }
+
+    /* ── Toast-Nachrichten ──────────────────────────────────── */
+    #toast-container {
+      position: fixed;
+      top: 1.25rem;
+      right: 1.25rem;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .toast {
+      padding: 0.85rem 1.25rem;
+      border-radius: 0.875rem;
+      font-weight: 600;
+      font-size: 0.9rem;
+      animation: slideUp 0.3s ease-out;
+      max-width: 340px;
+    }
+    .toast-success { background: linear-gradient(135deg, #27ae60, #1e8449); color: #fff; }
+    .toast-error   { background: linear-gradient(135deg, #e74c3c, #c0392b); color: #fff; }
+    .toast-info    { background: linear-gradient(135deg, #3498db, #2980b9); color: #fff; }
+
+    /* ── Spieler:innen-Waiting ──────────────────────────────── */
+    .waiting-dots::after {
+      content: '';
+      animation: dots 1.5s steps(4, end) infinite;
+    }
+    @keyframes dots {
+      0%   { content: ''; }
+      25%  { content: '.'; }
+      50%  { content: '..'; }
+      75%  { content: '...'; }
+      100% { content: ''; }
+    }
+
+    /* ── Feedback-Overlay ───────────────────────────────────── */
+    #player-feedback-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    #player-feedback-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    /* ── Modal ──────────────────────────────────────────────── */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      backdrop-filter: blur(4px);
+      z-index: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+
+    /* ── Konfetti-Partikel ─────────────────────────────────── */
+    .confetti {
+      position: fixed;
+      top: -20px;
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      animation: confettiFall linear forwards;
+      z-index: 9000;
+    }
+    @keyframes confettiFall {
+      to { transform: translateY(110vh) rotate(720deg); opacity: 0; }
+    }
+
+    /* ── Responsive ─────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      .answer-btn { font-size: 0.95rem; padding: 1rem 0.75rem; min-height: 70px; }
+    }
+  </style>
+</head>
+<body class="bg-game">
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     TOAST-CONTAINER
+═══════════════════════════════════════════════════════════════════════════ -->
+<div id="toast-container" role="alert" aria-live="polite"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     SPIELER:IN: FEEDBACK-OVERLAY
+═══════════════════════════════════════════════════════════════════════════ -->
+<div id="player-feedback-overlay">
+  <div id="feedback-card" class="glass p-8 text-center animate-pop" style="max-width:340px;width:90%;">
+    <div id="feedback-icon" class="text-7xl mb-4">✅</div>
+    <div id="feedback-title" class="text-3xl font-black mb-2">Richtig!</div>
+    <div id="feedback-points" class="text-5xl font-black text-yellow-400 mb-2">+850</div>
+    <div id="feedback-total"  class="text-lg text-white/70">Gesamt: 1.250 Punkte</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: STARTSEITE / ROLLENAUSWAHL
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="start" class="active min-h-screen flex flex-col items-center justify-center p-6">
+  <div class="text-center mb-10 animate-fade-in">
+    <div class="text-6xl mb-4">🎯</div>
+    <h1 class="text-5xl font-black tracking-tight bg-gradient-to-r from-brand-500 to-purple-400 bg-clip-text text-transparent">
+      QuizLive
+    </h1>
+    <p class="text-white/60 mt-2 text-lg">Echtzeit-Quiz für Gruppen</p>
+  </div>
+
+  <div class="grid gap-5 w-full max-w-sm animate-slide-up">
+    <button id="btn-go-join" onclick="showView('join')"
+      class="glass p-6 text-left hover:scale-[1.02] transition-transform group cursor-pointer border-none">
+      <div class="flex items-center gap-4">
+        <div class="text-4xl">🎮</div>
+        <div>
+          <div class="text-xl font-bold text-white group-hover:text-brand-500 transition-colors">Spielen</div>
+          <div class="text-white/50 text-sm">Mit Raumcode beitreten</div>
+        </div>
+        <div class="ml-auto text-white/30 text-2xl">›</div>
+      </div>
+    </button>
+
+    <button id="btn-go-admin-login" onclick="showView('admin-login')"
+      class="glass p-6 text-left hover:scale-[1.02] transition-transform group cursor-pointer border-none">
+      <div class="flex items-center gap-4">
+        <div class="text-4xl">🛡️</div>
+        <div>
+          <div class="text-xl font-bold text-white group-hover:text-brand-500 transition-colors">Admin-Bereich</div>
+          <div class="text-white/50 text-sm">Quiz verwalten & hosten</div>
+        </div>
+        <div class="ml-auto text-white/30 text-2xl">›</div>
+      </div>
+    </button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN BEITRETEN
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="join" class="min-h-screen flex flex-col items-center justify-center p-6">
+  <div class="w-full max-w-sm animate-slide-up">
+    <button onclick="showView('start')" class="text-white/50 hover:text-white mb-6 flex items-center gap-2 text-sm">
+      ← Zurück
+    </button>
+    <div class="glass p-8">
+      <div class="text-center mb-6">
+        <div class="text-5xl mb-3">🎮</div>
+        <h2 class="text-2xl font-black">Quiz beitreten</h2>
+        <p class="text-white/50 text-sm mt-1">Gib deinen Raumcode und Nickname ein</p>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="text-white/70 text-sm font-semibold block mb-1">Raumcode</label>
+          <input id="join-code" type="text" maxlength="4" placeholder="z.B. 4821"
+            class="form-input text-center text-2xl font-black tracking-widest uppercase"
+            oninput="this.value=this.value.replace(/\D/g,'').toUpperCase()"
+            onkeydown="if(event.key==='Enter')document.getElementById('join-nickname').focus()" />
+        </div>
+        <div>
+          <label class="text-white/70 text-sm font-semibold block mb-1">Dein Nickname</label>
+          <input id="join-nickname" type="text" maxlength="20" placeholder="z.B. Quizmaster"
+            class="form-input"
+            onkeydown="if(event.key==='Enter')joinRoom()" />
+        </div>
+        <button id="btn-join-room" onclick="joinRoom()" class="btn-primary w-full mt-2">
+          Beitreten
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: ADMIN LOGIN
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="admin-login" class="min-h-screen flex flex-col items-center justify-center p-6">
+  <div class="w-full max-w-sm animate-slide-up">
+    <button onclick="showView('start')" class="text-white/50 hover:text-white mb-6 flex items-center gap-2 text-sm">
+      ← Zurück
+    </button>
+    <div class="glass p-8">
+      <div class="text-center mb-6">
+        <div class="text-5xl mb-3">🛡️</div>
+        <h2 class="text-2xl font-black">Admin-Login</h2>
+        <p class="text-white/50 text-sm mt-1">Passwort eingeben</p>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="text-white/70 text-sm font-semibold block mb-1">Passwort</label>
+          <input id="admin-password-input" type="password" placeholder="Admin-Passwort"
+            class="form-input"
+            onkeydown="if(event.key==='Enter')adminLogin()" />
+        </div>
+        <button id="btn-admin-login" onclick="adminLogin()" class="btn-primary w-full">
+          Einloggen
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: ADMIN DASHBOARD
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="admin-dashboard" class="min-h-screen p-4 md:p-8">
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-8">
+    <div>
+      <h1 class="text-2xl font-black">🛡️ Admin-Dashboard</h1>
+      <p class="text-white/50 text-sm">Quiz-Verwaltung &amp; Live-Sessions</p>
+    </div>
+    <div class="flex gap-2">
+      <button onclick="showHistory()" class="btn-secondary text-sm">📊 Verlauf</button>
+      <button onclick="adminLogout()" class="btn-secondary text-sm">🚪 Logout</button>
+    </div>
+  </div>
+
+  <!-- Tab-Navigation -->
+  <div class="flex gap-2 mb-6 overflow-x-auto pb-1">
+    <button id="tab-btn-games"   onclick="switchTab('games')"   class="tab-btn active-tab flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all">📚 Quizze</button>
+    <button id="tab-btn-host"    onclick="switchTab('host')"    class="tab-btn flex-shrink-0 px-4 py-2 rounded-xl font-semibold text-sm transition-all text-white/60">🎙️ Live-Host</button>
+  </div>
+
+  <!-- Tab: Quizze verwalten -->
+  <div id="tab-games" class="space-y-6">
+    <!-- Neues Quiz erstellen -->
+    <div class="glass p-6">
+      <h2 class="text-lg font-bold mb-4">➕ Neues Quiz erstellen</h2>
+      <div class="grid md:grid-cols-3 gap-3">
+        <input id="new-game-title" type="text" placeholder="Quiz-Titel" class="form-input" maxlength="120" />
+        <input id="new-game-category" type="text" placeholder="Kategorie (z.B. Geografie)" class="form-input" maxlength="80" />
+        <button onclick="createGame()" class="btn-primary">Erstellen</button>
+      </div>
+    </div>
+
+    <!-- Quiz-Liste -->
+    <div id="games-list" class="space-y-4">
+      <div class="text-center text-white/40 py-8">Lade Quizze<span class="waiting-dots"></span></div>
+    </div>
+  </div>
+
+  <!-- Tab: Live-Host -->
+  <div id="tab-host" class="hidden space-y-6">
+    <div class="glass p-6">
+      <h2 class="text-lg font-bold mb-4">🎙️ Quiz als Host starten</h2>
+      <p class="text-white/60 text-sm mb-4">Wähle ein Quiz aus, erstelle einen Raum und lade Spieler:innen ein.</p>
+      <div class="flex gap-3 flex-wrap">
+        <select id="host-game-select" class="form-input flex-1 min-w-40">
+          <option value="">Quiz auswählen…</option>
+        </select>
+        <button onclick="createRoom()" class="btn-success">🚀 Raum erstellen</button>
+      </div>
+    </div>
+
+    <!-- Host-Lobby -->
+    <div id="host-lobby-section" class="hidden glass p-6">
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="text-center">
+          <p class="text-white/60 text-sm mb-2">Raumcode</p>
+          <div id="host-room-code" class="text-7xl font-black tracking-widest text-yellow-400">----</div>
+          <p class="text-white/40 text-xs mt-2">Spieler:innen geben diesen Code ein</p>
+        </div>
+        <div>
+          <div class="flex items-center justify-between mb-3">
+            <p class="font-semibold">Spieler:innen (<span id="host-player-count">0</span>/<span id="host-max-players">10</span>)</p>
+          </div>
+          <div id="host-player-list" class="space-y-2 max-h-48 overflow-y-auto">
+            <div class="text-white/40 text-sm text-center py-4">Noch keine Teilnehmer:innen…</div>
+          </div>
+          <button id="btn-start-game" onclick="startGame()" class="btn-success w-full mt-4" disabled>
+            ▶️ Spiel starten
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MODAL: FRAGE BEARBEITEN / ERSTELLEN
+═══════════════════════════════════════════════════════════════════════════ -->
+<div id="question-modal" class="modal-backdrop hidden">
+  <div class="glass-light w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 animate-slide-up" style="color:#111827;">
+    <div class="flex items-center justify-between mb-5">
+      <h3 id="modal-title" class="text-xl font-black text-gray-800">Frage hinzufügen</h3>
+      <button onclick="closeQuestionModal()" class="text-gray-400 hover:text-gray-800 text-2xl leading-none">✕</button>
+    </div>
+
+    <input type="hidden" id="modal-question-id" />
+    <input type="hidden" id="modal-game-id" />
+
+    <div class="space-y-4">
+      <!-- Fragetext -->
+      <div>
+        <label class="text-gray-700 text-sm font-semibold block mb-1">Fragetext *</label>
+        <textarea id="modal-question-text" rows="3" placeholder="Wie lautet die Frage?"
+          class="form-input-light resize-none"></textarea>
+      </div>
+
+      <!-- Typ -->
+      <div>
+        <label class="text-gray-700 text-sm font-semibold block mb-1">Fragetyp *</label>
+        <select id="modal-type" onchange="updateModalForType()" class="form-input-light">
+          <option value="single">Single-Choice (4 Optionen)</option>
+          <option value="truefalse">Wahr / Falsch (Ja / Nein)</option>
+        </select>
+      </div>
+
+      <!-- Antwortoptionen -->
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-sm font-semibold block mb-1 flex items-center gap-1">
+            <span class="inline-block w-5 h-5 rounded bg-red-500 text-white text-center text-xs leading-5">A</span>
+            Option A *
+          </label>
+          <input id="modal-option-a" type="text" class="form-input-light" placeholder="Antwort A" />
+        </div>
+        <div>
+          <label class="text-sm font-semibold block mb-1 flex items-center gap-1">
+            <span class="inline-block w-5 h-5 rounded bg-blue-500 text-white text-center text-xs leading-5">B</span>
+            Option B *
+          </label>
+          <input id="modal-option-b" type="text" class="form-input-light" placeholder="Antwort B" />
+        </div>
+        <div id="option-c-group">
+          <label class="text-sm font-semibold block mb-1 flex items-center gap-1">
+            <span class="inline-block w-5 h-5 rounded bg-yellow-500 text-white text-center text-xs leading-5">C</span>
+            Option C
+          </label>
+          <input id="modal-option-c" type="text" class="form-input-light" placeholder="Antwort C" />
+        </div>
+        <div id="option-d-group">
+          <label class="text-sm font-semibold block mb-1 flex items-center gap-1">
+            <span class="inline-block w-5 h-5 rounded bg-green-600 text-white text-center text-xs leading-5">D</span>
+            Option D
+          </label>
+          <input id="modal-option-d" type="text" class="form-input-light" placeholder="Antwort D" />
+        </div>
+      </div>
+
+      <!-- Korrekte Antwort -->
+      <div>
+        <label class="text-gray-700 text-sm font-semibold block mb-1">Korrekte Antwort *</label>
+        <select id="modal-correct-answer" class="form-input-light">
+          <option value="a">A</option>
+          <option value="b">B</option>
+          <option value="c">C</option>
+          <option value="d">D</option>
+        </select>
+      </div>
+
+      <!-- Erklärung (optional) -->
+      <div>
+        <label class="text-gray-700 text-sm font-semibold block mb-1">Erklärung (optional)</label>
+        <textarea id="modal-explanation" rows="2" placeholder="Wird nach der Auflösung angezeigt…"
+          class="form-input-light resize-none"></textarea>
+      </div>
+
+      <div class="flex gap-3 pt-2">
+        <button onclick="saveQuestion()" class="btn-primary flex-1">💾 Speichern</button>
+        <button onclick="closeQuestionModal()" class="btn-secondary">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MODAL: VERLAUF
+═══════════════════════════════════════════════════════════════════════════ -->
+<div id="history-modal" class="modal-backdrop hidden">
+  <div class="glass w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 animate-slide-up">
+    <div class="flex items-center justify-between mb-5">
+      <h3 class="text-xl font-black">📊 Spielverlauf</h3>
+      <button onclick="closeHistoryModal()" class="text-white/50 hover:text-white text-2xl leading-none">✕</button>
+    </div>
+    <div id="history-list" class="space-y-3">
+      <div class="text-white/40 text-center py-8">Lade Verlauf…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: HOST LIVE-STEUERUNG
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="host-game" class="min-h-screen p-4 md:p-8 flex flex-col">
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h2 id="host-game-title" class="text-xl font-black">Quiz</h2>
+      <p class="text-white/50 text-sm">Host-Steuerung</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <div class="glass px-3 py-1 text-sm">
+        Code: <span id="hg-room-code" class="font-black text-yellow-400">----</span>
+      </div>
+      <button onclick="endGameFromHost()" class="btn-danger text-xs">🛑 Beenden</button>
+    </div>
+  </div>
+
+  <!-- Status-Bar -->
+  <div id="hg-status-bar" class="glass p-4 mb-6 text-center">
+    <p id="hg-status-text" class="text-lg font-semibold text-white/80">Warte auf Spielstart…</p>
+    <div id="hg-answer-progress" class="hidden mt-2">
+      <div class="flex justify-center gap-2 text-sm text-white/60">
+        <span id="hg-answered-count">0</span> von <span id="hg-total-count">0</span> haben geantwortet
+      </div>
+      <div class="w-full bg-white/10 rounded-full h-2 mt-2">
+        <div id="hg-progress-bar" class="bg-brand-500 h-2 rounded-full transition-all" style="width:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Frage-Anzeige (Host-Sicht) -->
+  <div id="hg-question-display" class="hidden glass p-6 mb-6 animate-fade-in">
+    <div class="flex items-start justify-between gap-4 mb-5">
+      <div class="flex-1">
+        <div class="text-white/50 text-sm mb-2">
+          Frage <span id="hg-q-index">1</span> von <span id="hg-q-total">1</span>
+        </div>
+        <p id="hg-question-text" class="text-2xl font-bold leading-snug"></p>
+      </div>
+      <!-- Timer SVG -->
+      <div class="relative flex-shrink-0">
+        <svg width="72" height="72" viewBox="0 0 72 72">
+          <circle cx="36" cy="36" r="30" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="6"/>
+          <circle id="hg-timer-circle" cx="36" cy="36" r="30" fill="none" stroke="#5b7fff" stroke-width="6"
+            stroke-dasharray="188.5" stroke-dashoffset="0" stroke-linecap="round"
+            transform="rotate(-90 36 36)" class="timer-ring"/>
+        </svg>
+        <div class="absolute inset-0 flex items-center justify-center">
+          <span id="hg-timer-text" class="text-xl font-black">20</span>
+        </div>
+      </div>
+    </div>
+    <!-- Antwort-Optionen (Host-Preview) -->
+    <div id="hg-options-grid" class="grid grid-cols-2 gap-3"></div>
+  </div>
+
+  <!-- Auflösung (Host-Sicht) -->
+  <div id="hg-reveal-display" class="hidden glass p-6 mb-6 animate-slide-up">
+    <h3 class="text-lg font-bold mb-2">✅ Auflösung</h3>
+    <p id="hg-correct-answer-text" class="text-white/70 mb-3 text-sm"></p>
+    <div id="hg-explanation-box" class="hidden bg-blue-900/40 border border-blue-500/30 rounded-xl p-4 mb-4">
+      <p class="text-blue-200 text-sm">💡 <span id="hg-explanation-text"></span></p>
+    </div>
+    <!-- Mini-Rangliste -->
+    <div id="hg-mini-leaderboard" class="space-y-2 max-h-48 overflow-y-auto"></div>
+  </div>
+
+  <!-- Leaderboard (Host-Sicht) -->
+  <div id="hg-leaderboard-display" class="hidden glass p-6 mb-6 animate-pop">
+    <h3 class="text-xl font-black mb-4 text-center">🏆 Rangliste</h3>
+    <div id="hg-leaderboard-list" class="space-y-2"></div>
+  </div>
+
+  <!-- Game Over -->
+  <div id="hg-game-over-display" class="hidden glass p-6 mb-6 text-center animate-pop">
+    <div class="text-6xl mb-3">🎉</div>
+    <h3 class="text-2xl font-black mb-1">Spiel beendet!</h3>
+    <p id="hg-winner-text" class="text-yellow-400 font-bold text-lg mb-4"></p>
+    <div id="hg-final-leaderboard" class="space-y-2 mb-6"></div>
+    <button onclick="showView('admin-dashboard'); loadGames();" class="btn-primary">
+      ← Zurück zum Dashboard
+    </button>
+  </div>
+
+  <!-- Host-Aktions-Buttons -->
+  <div id="hg-action-bar" class="flex flex-wrap gap-3 mt-auto">
+    <button id="btn-host-reveal" onclick="hostRevealNow()" class="btn-secondary hidden">
+      ⚡ Jetzt aufdecken
+    </button>
+    <button id="btn-host-next" onclick="hostNext()" class="btn-primary hidden">
+      Weiter →
+    </button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN LOBBY
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="player-lobby" class="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+  <div class="animate-slide-up">
+    <div class="text-6xl mb-4">⏳</div>
+    <h2 class="text-3xl font-black mb-2">Du bist drin!</h2>
+    <p class="text-white/60 text-lg mb-1">Willkommen, <span id="pl-nickname" class="text-yellow-400 font-bold"></span></p>
+    <p class="text-white/50 text-sm mb-6">Quiz: <span id="pl-game-title" class="text-white/80"></span></p>
+    <div class="glass p-6 inline-block">
+      <p class="text-white/60 text-sm mb-1">Raum</p>
+      <div class="text-5xl font-black text-yellow-400 tracking-widest" id="pl-room-code"></div>
+    </div>
+    <p class="text-white/40 text-sm mt-6 waiting-dots">Warte auf den Host</p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN FRAGE
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="player-question" class="min-h-screen flex flex-col p-4">
+  <!-- Timer + Fortschritt -->
+  <div class="flex items-center justify-between mb-4">
+    <div class="text-white/50 text-sm">
+      Frage <span id="pq-index">1</span>/<span id="pq-total">1</span>
+    </div>
+    <div class="relative">
+      <svg width="56" height="56" viewBox="0 0 56 56">
+        <circle cx="28" cy="28" r="22" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="5"/>
+        <circle id="pq-timer-circle" cx="28" cy="28" r="22" fill="none" stroke="#5b7fff" stroke-width="5"
+          stroke-dasharray="138.2" stroke-dashoffset="0" stroke-linecap="round"
+          transform="rotate(-90 28 28)" class="timer-ring"/>
+      </svg>
+      <div class="absolute inset-0 flex items-center justify-center">
+        <span id="pq-timer-text" class="text-sm font-black">20</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Frage -->
+  <div class="glass p-5 mb-5 flex-shrink-0">
+    <p id="pq-question-text" class="text-xl font-bold text-center leading-snug"></p>
+  </div>
+
+  <!-- Antwort-Buttons -->
+  <div id="pq-options-grid" class="grid grid-cols-2 gap-3 flex-1">
+  </div>
+
+  <!-- Nickname-Anzeige unten -->
+  <div class="text-center text-white/30 text-xs mt-4">
+    👤 <span id="pq-nickname"></span>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN WARTEN (nach Antwort)
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="player-waiting" class="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+  <div class="animate-fade-in">
+    <div id="pw-icon" class="text-6xl mb-4">📨</div>
+    <h2 class="text-2xl font-black mb-2">Antwort übermittelt!</h2>
+    <p class="text-white/60 mb-6 waiting-dots">Warte auf die Auflösung</p>
+    <div class="glass p-5 inline-block">
+      <p class="text-white/50 text-sm mb-1">Deine Antwort</p>
+      <div id="pw-chosen-answer" class="text-2xl font-black text-yellow-400"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN LEADERBOARD
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="player-leaderboard" class="min-h-screen flex flex-col p-4">
+  <h2 class="text-2xl font-black text-center mb-6 mt-4">🏆 Rangliste</h2>
+  <div id="player-lb-list" class="space-y-3 max-w-md mx-auto w-full"></div>
+  <p class="text-center text-white/40 text-sm mt-6 waiting-dots">Warte auf nächste Frage</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN GAME OVER
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="player-game-over" class="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+  <div class="animate-pop">
+    <div class="text-7xl mb-4">🏁</div>
+    <h2 class="text-3xl font-black mb-2">Spiel vorbei!</h2>
+    <p id="pgo-rank-text" class="text-white/70 text-lg mb-6"></p>
+    <div id="pgo-final-lb" class="space-y-2 max-w-sm w-full mx-auto mb-8"></div>
+    <button onclick="showView('start'); resetPlayerState();" class="btn-primary">
+      🏠 Startseite
+    </button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: ABGEBROCHEN
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="game-aborted" class="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+  <div class="animate-fade-in">
+    <div class="text-7xl mb-4">🔌</div>
+    <h2 class="text-2xl font-black mb-2">Verbindung unterbrochen</h2>
+    <p id="aborted-message" class="text-white/60 mb-6">Das Spiel wurde beendet.</p>
+    <button onclick="showView('start'); resetPlayerState();" class="btn-primary">
+      🏠 Startseite
+    </button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+═══════════════════════════════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────────────
+const state = {
+  isAdmin: false,
+  socket: null,
+  currentView: 'start',
+  player: {
+    nickname: null,
+    roomCode: null,
+    currentAnswer: null,
+    score: 0,
+  },
+  host: {
+    roomCode: null,
+    gameId: null,
+    gameTitle: null,
+    players: [],
+    questionTimer: null,
+    questionDuration: 20,
+  },
+  games: [],
+  currentGameId: null, // Für Fragen-Verwaltung
+};
+
+// ── Timer-Variablen ──────────────────────────────────────────────────────────
+let playerTimerInterval = null;
+let hostTimerInterval   = null;
+
+// ── Socket.io initialisieren ──────────────────────────────────────────────────
+function initSocket() {
+  if (state.socket && state.socket.connected) return;
+  state.socket = io({ transports: ['websocket', 'polling'] });
+
+  state.socket.on('connect', () => {
+    console.log('[Socket] Verbunden:', state.socket.id);
+  });
+
+  state.socket.on('disconnect', (reason) => {
+    console.warn('[Socket] Getrennt:', reason);
+    if (['player-lobby','player-question','player-waiting','player-leaderboard'].includes(state.currentView)) {
+      showAborted('Verbindung zum Server verloren.');
+    }
+  });
+
+  // ── SPIELER:IN Events ─────────────────────────────────────────────────────
+  state.socket.on('question', (data) => {
+    stopPlayerTimer();
+    showPlayerQuestion(data);
+  });
+
+  state.socket.on('player_feedback', (data) => {
+    showPlayerFeedback(data);
+  });
+
+  state.socket.on('reveal', (data) => {
+    stopPlayerTimer();
+    if (state.currentView === 'player-waiting') {
+      // Kein weiteres Feedback nötig (bereits gezeigt)
+    }
+  });
+
+  state.socket.on('leaderboard', (data) => {
+    stopPlayerTimer();
+    showPlayerLeaderboard(data.leaderboard, data.isFinal);
+  });
+
+  state.socket.on('game_over', (data) => {
+    stopPlayerTimer();
+    showPlayerGameOver(data.leaderboard);
+  });
+
+  state.socket.on('game_aborted', (data) => {
+    stopPlayerTimer();
+    stopHostTimer();
+    showAborted(data.message);
+  });
+
+  // ── HOST Events ───────────────────────────────────────────────────────────
+  state.socket.on('player_joined', (data) => {
+    showToast(`🎮 ${data.nickname} ist beigetreten`, 'success');
+  });
+
+  state.socket.on('player_left', (data) => {
+    showToast(`👋 ${data.nickname} hat den Raum verlassen`, 'info');
+  });
+
+  state.socket.on('player_list', (data) => {
+    updateHostPlayerList(data.players);
+  });
+
+  state.socket.on('answer_count', (data) => {
+    updateAnswerCount(data.answered, data.total);
+  });
+
+  state.socket.on('question', (data) => {
+    if (isHost()) showHostQuestion(data);
+  });
+
+  state.socket.on('reveal', (data) => {
+    if (isHost()) {
+      stopHostTimer();
+      showHostReveal(data);
+    }
+  });
+
+  state.socket.on('leaderboard', (data) => {
+    if (isHost()) showHostLeaderboard(data.leaderboard, data.isFinal);
+  });
+
+  state.socket.on('game_over', (data) => {
+    if (isHost()) showHostGameOver(data.leaderboard);
+  });
+}
+
+// ── Hilfs-Funktionen ─────────────────────────────────────────────────────────
+function isHost() {
+  return state.currentView === 'host-game';
+}
+
+function showView(name) {
+  document.querySelectorAll('[data-view]').forEach(el => el.classList.remove('active'));
+  const target = document.querySelector(`[data-view="${name}"]`);
+  if (target) target.classList.add('active');
+  state.currentView = name;
+}
+
+function showToast(message, type = 'info', durationMs = 3500) {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 0.3s';
+    setTimeout(() => toast.remove(), 300);
+  }, durationMs);
+}
+
+function showAborted(message) {
+  document.getElementById('aborted-message').textContent = message || 'Das Spiel wurde beendet.';
+  showView('game-aborted');
+}
+
+// Sanitize HTML
+function esc(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+// API-Helper
+async function api(method, path, body) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+// ── Admin Login / Logout ──────────────────────────────────────────────────────
+async function adminLogin() {
+  const pw = document.getElementById('admin-password-input').value;
+  if (!pw) return showToast('Bitte Passwort eingeben.', 'error');
+  try {
+    await api('POST', '/api/admin/login', { password: pw });
+    state.isAdmin = true;
+    document.getElementById('admin-password-input').value = '';
+    showView('admin-dashboard');
+    loadGames();
+    loadHostGameSelect();
+    showToast('Erfolgreich eingeloggt! 👋', 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function adminLogout() {
+  try { await api('POST', '/api/admin/logout'); } catch (_) {}
+  state.isAdmin = false;
+  showView('start');
+  showToast('Ausgeloggt.', 'info');
+}
+
+async function checkAdminSession() {
+  try {
+    const res = await api('GET', '/api/admin/check');
+    state.isAdmin = res.isAdmin;
+    if (state.isAdmin) {
+      showView('admin-dashboard');
+      loadGames();
+      loadHostGameSelect();
+    }
+  } catch (_) {}
+}
+
+// ── Tab-Steuerung ─────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.remove('active-tab');
+    btn.classList.add('text-white/60');
+    btn.style.background = '';
+    btn.style.color = '';
+  });
+  document.getElementById(`tab-btn-${tab}`).classList.add('active-tab');
+  document.getElementById(`tab-btn-${tab}`).classList.remove('text-white/60');
+  document.getElementById(`tab-btn-${tab}`).style.background = 'rgba(91,127,255,0.25)';
+  document.getElementById(`tab-btn-${tab}`).style.color = '#fff';
+
+  document.getElementById('tab-games').classList.add('hidden');
+  document.getElementById('tab-host').classList.add('hidden');
+  document.getElementById(`tab-${tab}`).classList.remove('hidden');
+
+  if (tab === 'host') loadHostGameSelect();
+}
+
+// Initiales Tab-Styling
+document.getElementById('tab-btn-games').style.background = 'rgba(91,127,255,0.25)';
+document.getElementById('tab-btn-games').style.color = '#fff';
+
+// ── GAMES CRUD ────────────────────────────────────────────────────────────────
+async function loadGames() {
+  const container = document.getElementById('games-list');
+  container.innerHTML = '<div class="text-center text-white/40 py-8">Lade Quizze<span class="waiting-dots"></span></div>';
+  try {
+    const games = await api('GET', '/api/games');
+    state.games = games;
+    if (games.length === 0) {
+      container.innerHTML = '<div class="text-center text-white/40 py-8">Noch keine Quizze erstellt.</div>';
+      return;
+    }
+    container.innerHTML = games.map(g => renderGameCard(g)).join('');
+  } catch (err) {
+    container.innerHTML = `<div class="text-center text-red-400 py-4">Fehler: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderGameCard(game) {
+  return `
+  <div class="glass p-5 animate-fade-in" id="game-card-${game.id}">
+    <div class="flex items-start justify-between gap-3 mb-4">
+      <div>
+        <h3 class="text-lg font-bold">${esc(game.title)}</h3>
+        <p class="text-white/50 text-sm">${esc(game.category)} • ${game.question_count} Frage(n)</p>
+        <p class="text-white/30 text-xs mt-1">${new Date(game.created_at).toLocaleDateString('de-DE')}</p>
+      </div>
+      <div class="flex gap-2 flex-shrink-0">
+        <button onclick="downloadCsvTemplate()" class="btn-secondary text-xs" title="CSV-Vorlage herunterladen">📄 Vorlage</button>
+        <button onclick="openCsvImport(${game.id})" class="btn-secondary text-xs" title="CSV importieren">⬆️ CSV</button>
+        <button onclick="deleteGame(${game.id})" class="btn-danger text-xs">🗑️</button>
+      </div>
+    </div>
+
+    <!-- Fragen-Liste -->
+    <div id="questions-${game.id}" class="space-y-2 mb-3">
+      <div class="text-white/30 text-sm text-center py-2">Lade Fragen…</div>
+    </div>
+
+    <!-- Frage hinzufügen -->
+    <button onclick="openQuestionModal(null, ${game.id})"
+      class="w-full border-2 border-dashed border-white/20 rounded-xl py-2 text-white/40 hover:text-white/70 hover:border-white/40 transition-all text-sm font-semibold">
+      + Frage hinzufügen
+    </button>
+  </div>
+  <input type="file" id="csv-input-${game.id}" accept=".csv" class="hidden" onchange="handleCsvUpload(event, ${game.id})" />
+  `;
+}
+
+async function loadQuestionsForGame(gameId) {
+  const container = document.getElementById(`questions-${gameId}`);
+  if (!container) return;
+  try {
+    const data = await api('GET', `/api/games/${gameId}`);
+    if (data.questions.length === 0) {
+      container.innerHTML = '<div class="text-white/30 text-sm text-center py-2">Noch keine Fragen.</div>';
+      return;
+    }
+    container.innerHTML = data.questions.map((q, idx) => renderQuestionRow(q, idx)).join('');
+  } catch (err) {
+    container.innerHTML = `<div class="text-red-400 text-sm">Fehler: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderQuestionRow(q, idx) {
+  const typeLabel = q.type === 'truefalse' ? '✅ W/F' : '🔤 SC';
+  const correctLabel = { a: q.option_a, b: q.option_b, c: q.option_c, d: q.option_d }[q.correct_answer] || '';
+  return `
+  <div class="bg-white/5 rounded-xl p-3 flex items-start gap-3">
+    <div class="text-white/30 font-mono text-sm w-6 flex-shrink-0">${idx + 1}.</div>
+    <div class="flex-1 min-w-0">
+      <p class="text-sm font-semibold truncate">${esc(q.question_text)}</p>
+      <p class="text-white/40 text-xs mt-0.5">${typeLabel} • Richtig: ${esc(correctLabel)}</p>
+    </div>
+    <div class="flex gap-1 flex-shrink-0">
+      <button onclick="openQuestionModal(${q.id}, ${q.game_id})" class="text-white/50 hover:text-white text-xs px-2 py-1 rounded-lg hover:bg-white/10">✏️</button>
+      <button onclick="deleteQuestion(${q.id}, ${q.game_id})" class="text-red-400/60 hover:text-red-400 text-xs px-2 py-1 rounded-lg hover:bg-red-900/20">🗑️</button>
+    </div>
+  </div>`;
+}
+
+async function createGame() {
+  const title = document.getElementById('new-game-title').value.trim();
+  const category = document.getElementById('new-game-category').value.trim();
+  if (!title) return showToast('Bitte einen Titel eingeben.', 'error');
+  try {
+    await api('POST', '/api/games', { title, category: category || 'Allgemein' });
+    document.getElementById('new-game-title').value = '';
+    document.getElementById('new-game-category').value = '';
+    await loadGames();
+    // Fragen für alle neu geladenen Karten laden
+    state.games.forEach(g => loadQuestionsForGame(g.id));
+    showToast(`Quiz "${title}" erstellt! 🎉`, 'success');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function deleteGame(id) {
+  if (!confirm('Dieses Quiz und alle zugehörigen Fragen wirklich löschen?')) return;
+  try {
+    await api('DELETE', `/api/games/${id}`);
+    await loadGames();
+    state.games.forEach(g => loadQuestionsForGame(g.id));
+    showToast('Quiz gelöscht.', 'info');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+// ── Fragen Modal ──────────────────────────────────────────────────────────────
+let editingQuestionId = null;
+let editingGameId     = null;
+
+async function openQuestionModal(questionId, gameId) {
+  editingQuestionId = questionId;
+  editingGameId     = gameId;
+
+  document.getElementById('modal-game-id').value = gameId;
+  document.getElementById('modal-title').textContent = questionId ? 'Frage bearbeiten' : 'Frage hinzufügen';
+
+  // Felder zurücksetzen
+  document.getElementById('modal-question-text').value = '';
+  document.getElementById('modal-type').value = 'single';
+  document.getElementById('modal-option-a').value = '';
+  document.getElementById('modal-option-b').value = '';
+  document.getElementById('modal-option-c').value = '';
+  document.getElementById('modal-option-d').value = '';
+  document.getElementById('modal-correct-answer').value = 'a';
+  document.getElementById('modal-explanation').value = '';
+  updateModalForType();
+
+  if (questionId) {
+    try {
+      // Frage laden (aus lokalem State oder Fallback via API)
+      const data = await api('GET', `/api/games/${gameId}`);
+      const q = data.questions.find(x => x.id === questionId);
+      if (q) {
+        document.getElementById('modal-question-text').value = q.question_text || '';
+        document.getElementById('modal-type').value = q.type || 'single';
+        document.getElementById('modal-option-a').value = q.option_a || '';
+        document.getElementById('modal-option-b').value = q.option_b || '';
+        document.getElementById('modal-option-c').value = q.option_c || '';
+        document.getElementById('modal-option-d').value = q.option_d || '';
+        document.getElementById('modal-correct-answer').value = q.correct_answer || 'a';
+        document.getElementById('modal-explanation').value = q.explanation || '';
+        updateModalForType();
+      }
+    } catch (err) {
+      showToast('Fehler beim Laden der Frage.', 'error');
+    }
+  }
+
+  document.getElementById('question-modal').classList.remove('hidden');
+}
+
+function closeQuestionModal() {
+  document.getElementById('question-modal').classList.add('hidden');
+  editingQuestionId = null;
+  editingGameId = null;
+}
+
+function updateModalForType() {
+  const type = document.getElementById('modal-type').value;
+  const isTrueFalse = type === 'truefalse';
+
+  const optCGroup = document.getElementById('option-c-group');
+  const optDGroup = document.getElementById('option-d-group');
+  const correctSel = document.getElementById('modal-correct-answer');
+
+  if (isTrueFalse) {
+    document.getElementById('modal-option-a').value = 'Ja';
+    document.getElementById('modal-option-b').value = 'Nein';
+    document.getElementById('modal-option-c').value = '';
+    document.getElementById('modal-option-d').value = '';
+    optCGroup.style.display = 'none';
+    optDGroup.style.display = 'none';
+    // Nur A/B als korrekte Antwort erlauben
+    correctSel.innerHTML = '<option value="a">A – Ja</option><option value="b">B – Nein</option>';
+  } else {
+    optCGroup.style.display = '';
+    optDGroup.style.display = '';
+    correctSel.innerHTML = '<option value="a">A</option><option value="b">B</option><option value="c">C</option><option value="d">D</option>';
+  }
+}
+
+async function saveQuestion() {
+  const gameId = editingGameId;
+  const body = {
+    question_text:  document.getElementById('modal-question-text').value.trim(),
+    type:           document.getElementById('modal-type').value,
+    option_a:       document.getElementById('modal-option-a').value.trim(),
+    option_b:       document.getElementById('modal-option-b').value.trim(),
+    option_c:       document.getElementById('modal-option-c').value.trim() || '',
+    option_d:       document.getElementById('modal-option-d').value.trim() || '',
+    correct_answer: document.getElementById('modal-correct-answer').value,
+    explanation:    document.getElementById('modal-explanation').value.trim(),
+  };
+
+  if (!body.question_text) return showToast('Bitte Fragetext eingeben.', 'error');
+  if (!body.option_a || !body.option_b) return showToast('Option A und B sind Pflichtfelder.', 'error');
+
+  try {
+    if (editingQuestionId) {
+      await api('PUT', `/api/questions/${editingQuestionId}`, body);
+      showToast('Frage aktualisiert. ✏️', 'success');
+    } else {
+      await api('POST', `/api/games/${gameId}/questions`, body);
+      showToast('Frage hinzugefügt! ✅', 'success');
+    }
+    closeQuestionModal();
+    loadQuestionsForGame(gameId);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function deleteQuestion(questionId, gameId) {
+  if (!confirm('Diese Frage wirklich löschen?')) return;
+  try {
+    await api('DELETE', `/api/questions/${questionId}`);
+    showToast('Frage gelöscht.', 'info');
+    loadQuestionsForGame(gameId);
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+// ── CSV ───────────────────────────────────────────────────────────────────────
+function downloadCsvTemplate() {
+  window.open('/api/csv/template', '_blank');
+}
+
+function openCsvImport(gameId) {
+  const input = document.getElementById(`csv-input-${gameId}`);
+  if (input) input.click();
+}
+
+async function handleCsvUpload(event, gameId) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('csvfile', file);
+  try {
+    const res = await fetch(`/api/games/${gameId}/import-csv`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    showToast(data.message, 'success', 5000);
+    if (data.errors && data.errors.length > 0) {
+      console.warn('CSV Import Fehler:', data.errors);
+    }
+    loadQuestionsForGame(gameId);
+  } catch (err) {
+    showToast('CSV-Import fehlgeschlagen: ' + err.message, 'error', 5000);
+  }
+  event.target.value = '';
+}
+
+// ── Verlauf ───────────────────────────────────────────────────────────────────
+async function showHistory() {
+  document.getElementById('history-modal').classList.remove('hidden');
+  const container = document.getElementById('history-list');
+  container.innerHTML = '<div class="text-white/40 text-center py-8">Lade…</div>';
+  try {
+    const history = await api('GET', '/api/history');
+    if (history.length === 0) {
+      container.innerHTML = '<div class="text-white/40 text-center py-8">Noch keine gespielten Runden.</div>';
+      return;
+    }
+    container.innerHTML = history.map(h => `
+      <div class="bg-white/5 rounded-xl p-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="font-bold">${esc(h.game_title || 'Unbekanntes Quiz')}</p>
+            <p class="text-white/50 text-sm">
+              ${new Date(h.played_at).toLocaleString('de-DE')} •
+              ${h.player_count} Spieler:in(nen)
+            </p>
+          </div>
+          <div class="text-right">
+            <p class="text-yellow-400 font-black">${esc(h.winner_nickname || '–')}</p>
+            <p class="text-white/50 text-sm">${h.winner_score} Punkte</p>
+          </div>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    container.innerHTML = `<div class="text-red-400 text-center py-4">Fehler: ${esc(err.message)}</div>`;
+  }
+}
+
+function closeHistoryModal() {
+  document.getElementById('history-modal').classList.add('hidden');
+}
+
+// ── HOST: Raum erstellen ──────────────────────────────────────────────────────
+async function loadHostGameSelect() {
+  const sel = document.getElementById('host-game-select');
+  try {
+    const games = await api('GET', '/api/public/games');
+    sel.innerHTML = '<option value="">Quiz auswählen…</option>' +
+      games.map(g => `<option value="${g.id}">${esc(g.title)} (${g.question_count} Fragen)</option>`).join('');
+  } catch (_) {}
+}
+
+async function createRoom() {
+  const gameId = document.getElementById('host-game-select').value;
+  if (!gameId) return showToast('Bitte ein Quiz auswählen.', 'error');
+
+  initSocket();
+
+  state.socket.emit('host_create_room', { gameId: parseInt(gameId) }, (res) => {
+    if (res.error) return showToast(res.error, 'error');
+    state.host.roomCode = res.code;
+    state.host.gameId = gameId;
+    state.host.gameTitle = res.gameTitle;
+
+    document.getElementById('host-room-code').textContent = res.code;
+    document.getElementById('host-player-count').textContent = '0';
+    document.getElementById('host-player-list').innerHTML =
+      '<div class="text-white/40 text-sm text-center py-4">Noch keine Teilnehmer:innen…</div>';
+    document.getElementById('btn-start-game').disabled = true;
+    document.getElementById('host-lobby-section').classList.remove('hidden');
+
+    showToast(`Raum ${res.code} erstellt! 🚀`, 'success');
+  });
+}
+
+function updateHostPlayerList(players) {
+  const list  = document.getElementById('host-player-list');
+  const count = document.getElementById('host-player-count');
+  const btn   = document.getElementById('btn-start-game');
+
+  state.host.players = players;
+  count.textContent = players.length;
+  btn.disabled = players.length === 0;
+
+  if (players.length === 0) {
+    list.innerHTML = '<div class="text-white/40 text-sm text-center py-4">Noch keine Teilnehmer:innen…</div>';
+    return;
+  }
+  list.innerHTML = players.map(p => `
+    <div class="flex items-center justify-between bg-white/5 rounded-xl px-3 py-2">
+      <span class="font-semibold">${esc(p.nickname)}</span>
+      <span class="text-white/50 text-sm">${p.score} Pkt.</span>
+    </div>`
+  ).join('');
+}
+
+function startGame() {
+  if (!state.socket) return;
+  state.socket.emit('host_start_game', {}, (res) => {
+    if (res?.error) return showToast(res.error, 'error');
+    // Switch to host-game view
+    document.getElementById('host-lobby-section').classList.add('hidden');
+    document.getElementById('host-game-title').textContent = state.host.gameTitle || 'Quiz';
+    document.getElementById('hg-room-code').textContent = state.host.roomCode;
+    showView('host-game');
+    resetHostGameDisplay();
+  });
+}
+
+function resetHostGameDisplay() {
+  document.getElementById('hg-question-display').classList.add('hidden');
+  document.getElementById('hg-reveal-display').classList.add('hidden');
+  document.getElementById('hg-leaderboard-display').classList.add('hidden');
+  document.getElementById('hg-game-over-display').classList.add('hidden');
+  document.getElementById('hg-answer-progress').classList.add('hidden');
+  document.getElementById('btn-host-reveal').classList.add('hidden');
+  document.getElementById('btn-host-next').classList.add('hidden');
+  document.getElementById('hg-status-text').textContent = 'Quiz startet…';
+}
+
+// ── HOST: Frage anzeigen ──────────────────────────────────────────────────────
+const OPTION_LABELS = { a: 'A', b: 'B', c: 'C', d: 'D' };
+const OPTION_COLORS = { a: '#e74c3c', b: '#3498db', c: '#f39c12', d: '#27ae60' };
+
+function showHostQuestion(data) {
+  document.getElementById('hg-reveal-display').classList.add('hidden');
+  document.getElementById('hg-leaderboard-display').classList.add('hidden');
+  document.getElementById('hg-game-over-display').classList.add('hidden');
+
+  document.getElementById('hg-q-index').textContent = data.index + 1;
+  document.getElementById('hg-q-total').textContent = data.total;
+  document.getElementById('hg-question-text').textContent = data.question_text;
+
+  const grid = document.getElementById('hg-options-grid');
+  const opts = [
+    { key: 'a', text: data.option_a },
+    { key: 'b', text: data.option_b },
+    { key: 'c', text: data.option_c },
+    { key: 'd', text: data.option_d },
+  ].filter(o => o.text);
+  grid.innerHTML = opts.map(o => `
+    <div style="background:${OPTION_COLORS[o.key]};border-radius:0.75rem;padding:0.75rem 1rem;display:flex;align-items:center;gap:0.5rem;">
+      <span style="font-weight:900;font-size:1.1rem;">${OPTION_LABELS[o.key]}</span>
+      <span style="font-size:0.9rem;">${esc(o.text)}</span>
+    </div>`).join('');
+
+  document.getElementById('hg-question-display').classList.remove('hidden');
+  document.getElementById('hg-answer-progress').classList.remove('hidden');
+  document.getElementById('hg-answered-count').textContent = '0';
+  document.getElementById('hg-total-count').textContent = state.host.players?.length || 0;
+  document.getElementById('hg-progress-bar').style.width = '0%';
+
+  document.getElementById('btn-host-reveal').classList.remove('hidden');
+  document.getElementById('btn-host-next').classList.add('hidden');
+  document.getElementById('hg-status-text').textContent = `⏱️ Frage läuft… (${data.timeSeconds}s)`;
+
+  startHostTimer(data.timeSeconds);
+}
+
+function updateAnswerCount(answered, total) {
+  document.getElementById('hg-answered-count').textContent = answered;
+  document.getElementById('hg-total-count').textContent = total;
+  const pct = total > 0 ? Math.round((answered / total) * 100) : 0;
+  document.getElementById('hg-progress-bar').style.width = pct + '%';
+}
+
+// ── HOST: Auflösung ───────────────────────────────────────────────────────────
+function showHostReveal(data) {
+  document.getElementById('hg-question-display').classList.add('hidden');
+  document.getElementById('hg-answer-progress').classList.add('hidden');
+  document.getElementById('btn-host-reveal').classList.add('hidden');
+
+  // Korrekte Antwort anzeigen
+  document.getElementById('hg-correct-answer-text').textContent =
+    `Richtige Antwort: ${OPTION_LABELS[data.correctAnswer]}`;
+
+  // Erklärung
+  const expBox = document.getElementById('hg-explanation-box');
+  if (data.explanation) {
+    document.getElementById('hg-explanation-text').textContent = data.explanation;
+    expBox.classList.remove('hidden');
+  } else {
+    expBox.classList.add('hidden');
+  }
+
+  // Mini-Rangliste
+  const entries = Object.entries(data.results)
+    .sort((a, b) => b[1].totalScore - a[1].totalScore)
+    .slice(0, 5);
+  document.getElementById('hg-mini-leaderboard').innerHTML = entries.map(([nick, res]) => `
+    <div class="flex items-center justify-between bg-white/5 rounded-xl px-3 py-2 text-sm">
+      <span class="${res.correct ? 'text-green-400' : 'text-red-400'} font-semibold">${res.correct ? '✓' : '✗'} ${esc(nick)}</span>
+      <span class="text-white/60">+${res.points} (${res.totalScore})</span>
+    </div>`).join('');
+
+  document.getElementById('hg-reveal-display').classList.remove('hidden');
+  document.getElementById('hg-status-text').textContent = '✅ Auflösung';
+  document.getElementById('btn-host-next').classList.remove('hidden');
+  document.getElementById('btn-host-next').textContent = 'Rangliste →';
+}
+
+// ── HOST: Leaderboard ─────────────────────────────────────────────────────────
+function showHostLeaderboard(leaderboard, isFinal) {
+  document.getElementById('hg-reveal-display').classList.add('hidden');
+
+  document.getElementById('hg-leaderboard-list').innerHTML = leaderboard.map((entry, i) => `
+    <div class="flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank-other'}" style="color:${i<3?'#111':'#fff'}">
+      <span class="font-black text-xl w-8 text-center">${entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : entry.rank}</span>
+      <span class="flex-1 font-bold">${esc(entry.nickname)}</span>
+      <span class="font-black">${entry.score}</span>
+    </div>`).join('');
+
+  document.getElementById('hg-leaderboard-display').classList.remove('hidden');
+  document.getElementById('hg-status-text').textContent = '🏆 Rangliste';
+  document.getElementById('btn-host-next').classList.remove('hidden');
+  document.getElementById('btn-host-next').textContent = isFinal ? 'Fertig' : 'Nächste Frage →';
+}
+
+// ── HOST: Game Over ───────────────────────────────────────────────────────────
+function showHostGameOver(leaderboard) {
+  stopHostTimer();
+  document.getElementById('hg-leaderboard-display').classList.add('hidden');
+  document.getElementById('btn-host-next').classList.add('hidden');
+  document.getElementById('btn-host-reveal').classList.add('hidden');
+
+  const winner = leaderboard[0];
+  document.getElementById('hg-winner-text').textContent =
+    winner ? `🥇 ${winner.nickname} gewinnt mit ${winner.score} Punkten!` : '';
+
+  document.getElementById('hg-final-leaderboard').innerHTML = leaderboard.map((entry, i) => `
+    <div class="flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank-other'}" style="color:${i<3?'#111':'#fff'}">
+      <span class="font-black text-xl w-8 text-center">${entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : entry.rank}</span>
+      <span class="flex-1 font-bold">${esc(entry.nickname)}</span>
+      <span class="font-black">${entry.score}</span>
+    </div>`).join('');
+
+  document.getElementById('hg-game-over-display').classList.remove('hidden');
+  document.getElementById('hg-status-text').textContent = '🎉 Spiel beendet!';
+  launchConfetti();
+}
+
+function hostNext() {
+  if (!state.socket) return;
+  state.socket.emit('host_next', {}, (res) => {
+    if (res?.error) showToast(res.error, 'error');
+  });
+}
+
+function hostRevealNow() {
+  if (!state.socket) return;
+  state.socket.emit('host_reveal_now', {}, (res) => {
+    if (res?.error) showToast(res.error, 'error');
+  });
+}
+
+function endGameFromHost() {
+  if (!confirm('Spiel wirklich beenden?')) return;
+  if (state.socket) {
+    state.socket.emit('host_end_game', {}, () => {});
+  }
+  stopHostTimer();
+  showView('admin-dashboard');
+  loadGames();
+}
+
+// ── Host Timer ────────────────────────────────────────────────────────────────
+function startHostTimer(seconds) {
+  stopHostTimer();
+  const circumference = 188.5; // 2π × 30
+  let remaining = seconds;
+  const circle = document.getElementById('hg-timer-circle');
+  const text   = document.getElementById('hg-timer-text');
+
+  function update() {
+    const pct = remaining / seconds;
+    circle.style.strokeDashoffset = circumference * (1 - pct);
+    text.textContent = remaining;
+    circle.style.stroke = remaining > 10 ? '#5b7fff' : remaining > 5 ? '#f39c12' : '#e74c3c';
+  }
+  update();
+
+  hostTimerInterval = setInterval(() => {
+    remaining--;
+    if (remaining < 0) { stopHostTimer(); return; }
+    update();
+  }, 1000);
+}
+
+function stopHostTimer() {
+  if (hostTimerInterval) { clearInterval(hostTimerInterval); hostTimerInterval = null; }
+}
+
+// ── SPIELER:IN: Beitreten ─────────────────────────────────────────────────────
+function joinRoom() {
+  const code = document.getElementById('join-code').value.trim();
+  const nick = document.getElementById('join-nickname').value.trim();
+
+  if (code.length !== 4 || !/^\d+$/.test(code)) {
+    return showToast('Bitte einen 4-stelligen Zahlen-Code eingeben.', 'error');
+  }
+  if (!nick || nick.length < 1) {
+    return showToast('Bitte einen Nickname eingeben.', 'error');
+  }
+
+  initSocket();
+
+  state.socket.emit('player_join', { code, nickname: nick }, (res) => {
+    if (res.error) return showToast(res.error, 'error');
+    state.player.nickname = res.nickname;
+    state.player.roomCode = code;
+    state.player.score = 0;
+
+    document.getElementById('pl-nickname').textContent = res.nickname;
+    document.getElementById('pl-game-title').textContent = res.gameTitle;
+    document.getElementById('pl-room-code').textContent = code;
+    document.getElementById('pq-nickname').textContent = res.nickname;
+    showView('player-lobby');
+    showToast(`Willkommen, ${res.nickname}! 🎮`, 'success');
+  });
+}
+
+// ── SPIELER:IN: Frage anzeigen ────────────────────────────────────────────────
+function showPlayerQuestion(data) {
+  state.player.currentAnswer = null;
+
+  document.getElementById('pq-index').textContent = data.index + 1;
+  document.getElementById('pq-total').textContent  = data.total;
+  document.getElementById('pq-question-text').textContent = data.question_text;
+
+  const grid = document.getElementById('pq-options-grid');
+  const opts = [
+    { key: 'a', text: data.option_a },
+    { key: 'b', text: data.option_b },
+    { key: 'c', text: data.option_c },
+    { key: 'd', text: data.option_d },
+  ].filter(o => o.text);
+
+  const icons = { a: '🔴', b: '🔵', c: '🟡', d: '🟢' };
+
+  grid.innerHTML = opts.map(o => `
+    <button id="pq-btn-${o.key}" class="answer-btn btn-${o.key}" onclick="submitAnswer('${o.key}', '${esc(o.text)}')">
+      <span class="text-2xl">${icons[o.key]}</span>
+      <span>${esc(o.text)}</span>
+    </button>`).join('');
+
+  showView('player-question');
+  startPlayerTimer(data.timeSeconds);
+}
+
+function submitAnswer(key, text) {
+  if (state.player.currentAnswer) return; // Bereits geantwortet
+  state.player.currentAnswer = key;
+
+  // Alle Buttons deaktivieren
+  ['a','b','c','d'].forEach(k => {
+    const btn = document.getElementById(`pq-btn-${k}`);
+    if (btn) btn.disabled = true;
+  });
+
+  // Gewählten Button hervorheben
+  const chosen = document.getElementById(`pq-btn-${key}`);
+  if (chosen) chosen.style.opacity = '1';
+
+  state.socket.emit('player_answer', { answer: key }, (res) => {
+    if (res?.error) {
+      showToast(res.error, 'error');
+    } else {
+      document.getElementById('pw-chosen-answer').textContent = text;
+      stopPlayerTimer();
+      showView('player-waiting');
+    }
+  });
+}
+
+// ── SPIELER:IN: Feedback ──────────────────────────────────────────────────────
+function showPlayerFeedback(data) {
+  const overlay = document.getElementById('player-feedback-overlay');
+  const icon    = document.getElementById('feedback-icon');
+  const title   = document.getElementById('feedback-title');
+  const points  = document.getElementById('feedback-points');
+  const total   = document.getElementById('feedback-total');
+
+  if (data.correct) {
+    icon.textContent  = '✅';
+    title.textContent = 'Richtig!';
+    title.style.color = '#2ecc71';
+    overlay.style.background = 'rgba(39,174,96,0.85)';
+  } else {
+    icon.textContent  = '❌';
+    title.textContent = 'Falsch!';
+    title.style.color = '#e74c3c';
+    overlay.style.background = 'rgba(231,76,60,0.85)';
+  }
+
+  points.textContent = data.points > 0 ? `+${data.points}` : '0';
+  total.textContent  = `Gesamt: ${data.totalScore} Punkte`;
+
+  overlay.classList.add('visible');
+
+  // Overlay nach 2.5s ausblenden
+  setTimeout(() => {
+    overlay.classList.remove('visible');
+  }, 2500);
+}
+
+// ── SPIELER:IN: Leaderboard ────────────────────────────────────────────────────
+function showPlayerLeaderboard(leaderboard, isFinal) {
+  const list = document.getElementById('player-lb-list');
+  const myNick = state.player.nickname;
+
+  list.innerHTML = leaderboard.map((entry, i) => {
+    const isMe = entry.nickname === myNick;
+    return `
+    <div class="flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank-other'} ${isMe ? 'ring-2 ring-white' : ''}" style="color:${i<3?'#111':'#fff'}">
+      <span class="font-black text-xl w-8 text-center">${entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : entry.rank}</span>
+      <span class="flex-1 font-bold">${esc(entry.nickname)} ${isMe ? '← Du' : ''}</span>
+      <span class="font-black">${entry.score}</span>
+    </div>`;
+  }).join('');
+
+  showView('player-leaderboard');
+}
+
+// ── SPIELER:IN: Game Over ──────────────────────────────────────────────────────
+function showPlayerGameOver(leaderboard) {
+  const myNick = state.player.nickname;
+  const myEntry = leaderboard.find(e => e.nickname === myNick);
+
+  document.getElementById('pgo-rank-text').textContent =
+    myEntry ? `Dein Platz: ${myEntry.rank}. Rang • ${myEntry.score} Punkte` : '';
+
+  document.getElementById('pgo-final-lb').innerHTML = leaderboard.map((entry, i) => {
+    const isMe = entry.nickname === myNick;
+    return `
+    <div class="flex items-center gap-3 p-3 rounded-xl ${i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : i === 2 ? 'rank-3' : 'rank-other'} ${isMe ? 'ring-2 ring-white' : ''}" style="color:${i<3?'#111':'#fff'}">
+      <span class="font-black text-xl w-8 text-center">${entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : entry.rank}</span>
+      <span class="flex-1 font-bold">${esc(entry.nickname)} ${isMe ? '← Du' : ''}</span>
+      <span class="font-black">${entry.score}</span>
+    </div>`;
+  }).join('');
+
+  showView('player-game-over');
+  launchConfetti();
+}
+
+// ── Spieler:in Timer ──────────────────────────────────────────────────────────
+function startPlayerTimer(seconds) {
+  stopPlayerTimer();
+  const circumference = 138.2; // 2π × 22
+  let remaining = seconds;
+  const circle = document.getElementById('pq-timer-circle');
+  const text   = document.getElementById('pq-timer-text');
+
+  function update() {
+    const pct = remaining / seconds;
+    circle.style.strokeDashoffset = circumference * (1 - pct);
+    text.textContent = remaining;
+    circle.style.stroke = remaining > 10 ? '#5b7fff' : remaining > 5 ? '#f39c12' : '#e74c3c';
+  }
+  update();
+
+  playerTimerInterval = setInterval(() => {
+    remaining--;
+    if (remaining < 0) { stopPlayerTimer(); return; }
+    update();
+  }, 1000);
+}
+
+function stopPlayerTimer() {
+  if (playerTimerInterval) { clearInterval(playerTimerInterval); playerTimerInterval = null; }
+}
+
+// ── Spieler:in State Reset ────────────────────────────────────────────────────
+function resetPlayerState() {
+  state.player = { nickname: null, roomCode: null, currentAnswer: null, score: 0 };
+  if (state.socket) {
+    state.socket.disconnect();
+    state.socket = null;
+  }
+}
+
+// ── Konfetti 🎉 ───────────────────────────────────────────────────────────────
+function launchConfetti() {
+  const colors = ['#e74c3c','#3498db','#f39c12','#27ae60','#9b59b6','#f1c40f'];
+  for (let i = 0; i < 80; i++) {
+    setTimeout(() => {
+      const el = document.createElement('div');
+      el.className = 'confetti';
+      el.style.left = Math.random() * 100 + 'vw';
+      el.style.background = colors[Math.floor(Math.random() * colors.length)];
+      el.style.animationDuration = (Math.random() * 2 + 2) + 's';
+      el.style.animationDelay = '0s';
+      el.style.transform = `rotate(${Math.random()*360}deg)`;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 4000);
+    }, Math.random() * 1000);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  checkAdminSession();
+
+  // Nach dem Rendern der Game-Liste → Fragen laden
+  const observer = new MutationObserver(() => {
+    state.games.forEach(g => {
+      const container = document.getElementById(`questions-${g.id}`);
+      if (container && container.textContent.includes('Lade Fragen')) {
+        loadQuestionsForGame(g.id);
+      }
+    });
+  });
+  observer.observe(document.getElementById('games-list'), { childList: true });
+
+  // Modal: Klick außerhalb schließt
+  document.getElementById('question-modal').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('question-modal')) closeQuestionModal();
+  });
+  document.getElementById('history-modal').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('history-modal')) closeHistoryModal();
+  });
+
+  // Keyboard: Escape schließt Modal
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeQuestionModal();
+      closeHistoryModal();
+    }
+  });
+});
+</script>
+</body>
+</html>
