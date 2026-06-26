@@ -18,7 +18,12 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const MAX_PLAYERS = 10;
-const QUESTION_TIME_SECONDS = 20;
+// Erlaubte Antwortzeiten (Sekunden) – wird bei Raum-Erstellung gewählt
+const ALLOWED_QUESTION_TIMES = [10, 20, 30, 60];
+const DEFAULT_QUESTION_TIME  = 20;
+// Auto-Advance-Wartezeit nach Auflösung (Sekunden)
+const AUTO_ADVANCE_REVEAL_DELAY = 5;
+const AUTO_ADVANCE_LB_DELAY     = 4;
 
 // ── Express & HTTP-Server ────────────────────────────────────────────────────
 const app = express();
@@ -366,17 +371,21 @@ app.get('/api/public/games', requireAdmin, async (_req, res) => {
 
 /**
  * @typedef {Object} Room
- * @property {string}   code           - 4-stelliger Raumcode
- * @property {string}   hostSocketId   - Socket-ID des Hosts
+ * @property {string}   code                 - 4-stelliger Raumcode
+ * @property {string}   hostSocketId         - Socket-ID des Hosts
  * @property {'LOBBY'|'QUESTION_ASKED'|'REVEAL'|'LEADERBOARD'|'GAME_OVER'} state
- * @property {number}   gameId         - ID des gewählten Quizzes
- * @property {string}   gameTitle      - Titel des Quizzes
- * @property {Array}    questions      - Alle Fragen des Quizzes
- * @property {number}   currentQuestionIndex
- * @property {Map}      players        - nickname → { socketId, score, answers[] }
- * @property {Map}      answers        - Antworten für aktuelle Frage: nickname → { answer, timeMs }
+ * @property {number}   gameId               - ID des gewählten Quizzes
+ * @property {string}   gameTitle            - Titel des Quizzes
+ * @property {Array}    questions            - Alle Fragen des Quizzes (ggf. gemischt)
+ * @property {number}   currentQuestionIndex - Index in questions[]
+ * @property {Map}      players              - nickname → { socketId, score, answers[] }
+ * @property {Map}      answers              - Antworten für aktuelle Frage: nickname → { answer, timeMs }
  * @property {NodeJS.Timeout|null} timer
- * @property {number}   questionStartTime - Unix-Timestamp ms
+ * @property {NodeJS.Timeout|null} autoAdvanceTimer - Timer für Auto-Weiterschaltung
+ * @property {number}   questionStartTime    - Unix-Timestamp ms
+ * @property {number}   questionTimeSeconds  - Konfigurierte Antwortzeit
+ * @property {boolean}  shuffleQuestions     - Fragen zufällig mischen
+ * @property {boolean}  autoAdvance          - Automatisch weiterschalten
  */
 
 /** @type {Map<string, Room>} */
@@ -395,14 +404,29 @@ function generateRoomCode() {
 }
 
 /**
+ * Fisher-Yates-Shuffle: Mischt ein Array in-place und gibt es zurück.
+ * @template T
+ * @param {T[]} array
+ * @returns {T[]}
+ */
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+/**
  * Berechnet die Punktzahl basierend auf Korrektheit und Antwortgeschwindigkeit.
  * @param {boolean} correct
- * @param {number}  timeMs - Zeit bis zur Antwort in Millisekunden
+ * @param {number}  timeMs            - Zeit bis zur Antwort in Millisekunden
+ * @param {number}  questionTimeSeconds - Konfigurierte Fragenzeit des Raums
  * @returns {number}
  */
-function calculateScore(correct, timeMs) {
+function calculateScore(correct, timeMs, questionTimeSeconds) {
   if (!correct) return 0;
-  const maxTime = QUESTION_TIME_SECONDS * 1000;
+  const maxTime = (questionTimeSeconds ?? DEFAULT_QUESTION_TIME) * 1000;
   const timeBonus = Math.max(0, Math.round((1 - timeMs / maxTime) * 500));
   return 500 + timeBonus; // Basis: 500 + bis zu 500 Zeitbonus = max. 1000
 }
@@ -427,7 +451,7 @@ function emitPlayerList(room) {
   const players = Array.from(room.players.entries()).map(([nickname, data]) => ({
     nickname,
     score: data.score,
-    connected: !!io.sockets.sockets.get(data.socketId),
+    connected: !!(data.connected && io.sockets.sockets.get(data.socketId)),
   }));
   io.to(room.code).emit('player_list', { players });
 }
@@ -443,7 +467,7 @@ function startQuestionTimer(room, roomCode) {
     if (rooms.get(roomCode)?.state === 'QUESTION_ASKED') {
       revealAnswer(room, roomCode, 'timeout');
     }
-  }, QUESTION_TIME_SECONDS * 1000);
+  }, room.questionTimeSeconds * 1000);
 }
 
 /**
@@ -457,6 +481,8 @@ function revealAnswer(room, roomCode, reason) {
     clearTimeout(room.timer);
     room.timer = null;
   }
+  // Bereits im REVEAL-Zustand? (Doppelaufruf vermeiden)
+  if (room.state === 'REVEAL' || room.state === 'LEADERBOARD' || room.state === 'GAME_OVER') return;
   room.state = 'REVEAL';
 
   const question = room.questions[room.currentQuestionIndex];
@@ -467,7 +493,11 @@ function revealAnswer(room, roomCode, reason) {
   room.players.forEach((playerData, nickname) => {
     const answerData = room.answers.get(nickname);
     const isCorrect = answerData?.answer === correctAnswer;
-    const points = calculateScore(isCorrect, answerData?.timeMs ?? QUESTION_TIME_SECONDS * 1000 + 1);
+    const points = calculateScore(
+      isCorrect,
+      answerData?.timeMs ?? room.questionTimeSeconds * 1000 + 1,
+      room.questionTimeSeconds
+    );
     playerData.score += points;
     results[nickname] = {
       answer: answerData?.answer ?? null,
@@ -483,6 +513,8 @@ function revealAnswer(room, roomCode, reason) {
     explanation: question.explanation || null,
     results,
     reason,
+    autoAdvance: room.autoAdvance,
+    autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_REVEAL_DELAY : null,
   });
 
   // Individuelles Feedback an jede:n Spieler:in
@@ -498,6 +530,44 @@ function revealAnswer(room, roomCode, reason) {
       });
     }
   });
+
+  // ── Auto-Advance: nach Reveal automatisch zur Rangliste weiterschalten ──────
+  if (room.autoAdvance) {
+    if (room.autoAdvanceTimer) clearTimeout(room.autoAdvanceTimer);
+    room.autoAdvanceTimer = setTimeout(() => {
+      const currentRoom = rooms.get(roomCode);
+      if (!currentRoom || currentRoom.state !== 'REVEAL') return;
+      // → Leaderboard
+      currentRoom.state = 'LEADERBOARD';
+      const leaderboard = getLeaderboard(currentRoom);
+      io.to(roomCode).emit('leaderboard', {
+        leaderboard,
+        isFinal: false,
+        autoAdvance: true,
+        autoAdvanceDelay: AUTO_ADVANCE_LB_DELAY,
+      });
+      // → nach weiterer Verzögerung nächste Frage oder Game Over
+      if (currentRoom.autoAdvanceTimer) clearTimeout(currentRoom.autoAdvanceTimer);
+      currentRoom.autoAdvanceTimer = setTimeout(() => {
+        const r = rooms.get(roomCode);
+        if (!r || r.state !== 'LEADERBOARD') return;
+        r.currentQuestionIndex++;
+        if (r.currentQuestionIndex >= r.questions.length) {
+          r.state = 'GAME_OVER';
+          const finalLb = getLeaderboard(r);
+          io.to(roomCode).emit('game_over', { leaderboard: finalLb });
+          const winner = finalLb[0] ?? null;
+          dbRun(
+            `INSERT INTO game_history (game_id, game_title, player_count, winner_nickname, winner_score, results_json)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [r.gameId, r.gameTitle, r.players.size, winner?.nickname ?? null, winner?.score ?? 0, JSON.stringify(finalLb)]
+          ).catch(err => console.error('[DB] Fehler beim Speichern der Historie:', err));
+        } else {
+          sendNextQuestion(r, roomCode);
+        }
+      }, AUTO_ADVANCE_LB_DELAY * 1000);
+    }, AUTO_ADVANCE_REVEAL_DELAY * 1000);
+  }
 }
 
 /**
@@ -506,6 +576,11 @@ function revealAnswer(room, roomCode, reason) {
  * @param {string} roomCode
  */
 function sendNextQuestion(room, roomCode) {
+  // Laufende Auto-Advance-Timer abbrechen
+  if (room.autoAdvanceTimer) {
+    clearTimeout(room.autoAdvanceTimer);
+    room.autoAdvanceTimer = null;
+  }
   const question = room.questions[room.currentQuestionIndex];
   room.state = 'QUESTION_ASKED';
   room.answers = new Map();
@@ -520,7 +595,7 @@ function sendNextQuestion(room, roomCode) {
     option_b: question.option_b,
     option_c: question.option_c,
     option_d: question.option_d,
-    timeSeconds: QUESTION_TIME_SECONDS,
+    timeSeconds: room.questionTimeSeconds,
   };
 
   io.to(roomCode).emit('question', questionData);
@@ -532,17 +607,29 @@ io.on('connection', (socket) => {
   console.log(`[Socket] Verbunden: ${socket.id}`);
 
   // ── HOST: Raum erstellen ────────────────────────────────────────────────────
-  socket.on('host_create_room', async ({ gameId }, callback) => {
+  socket.on('host_create_room', async ({ gameId, options }, callback) => {
     try {
       const game = await dbGet('SELECT * FROM games WHERE id = ?', [gameId]);
       if (!game) return callback({ error: 'Quiz nicht gefunden.' });
 
-      const questions = await dbAll(
+      let questions = await dbAll(
         'SELECT * FROM questions WHERE game_id = ? ORDER BY order_index, id',
         [gameId]
       );
       if (questions.length === 0) {
         return callback({ error: 'Dieses Quiz hat keine Fragen.' });
+      }
+
+      // Optionen validieren und anwenden
+      const questionTimeSeconds = ALLOWED_QUESTION_TIMES.includes(Number(options?.questionTime))
+        ? Number(options.questionTime)
+        : DEFAULT_QUESTION_TIME;
+      const shuffleQuestions = options?.shuffle === true;
+      const autoAdvance      = options?.autoAdvance === true;
+
+      // Fragen mischen (Kopie erstellen, Original in DB unberührt)
+      if (shuffleQuestions) {
+        questions = shuffleArray([...questions]);
       }
 
       const code = generateRoomCode();
@@ -558,18 +645,114 @@ io.on('connection', (socket) => {
         players: new Map(),
         answers: new Map(),
         timer: null,
+        autoAdvanceTimer: null,
         questionStartTime: 0,
+        questionTimeSeconds,
+        shuffleQuestions,
+        autoAdvance,
       };
 
       rooms.set(code, room);
       socketToRoom.set(socket.id, code);
       socket.join(code);
 
-      console.log(`[Room] Erstellt: ${code} (Quiz: "${game.title}", ${questions.length} Fragen)`);
-      callback({ success: true, code, gameTitle: game.title, questionCount: questions.length });
+      console.log(`[Room] Erstellt: ${code} (Quiz: "${game.title}", ${questions.length} Fragen, ${questionTimeSeconds}s, shuffle=${shuffleQuestions}, auto=${autoAdvance})`);
+      callback({
+        success: true,
+        code,
+        gameTitle: game.title,
+        questionCount: questions.length,
+        questionTimeSeconds,
+        autoAdvance,
+        shuffleQuestions,
+      });
     } catch (err) {
       console.error('[Socket] host_create_room:', err);
       callback({ error: 'Interner Serverfehler.' });
+    }
+  });
+
+  // ── HEARTBEAT: Ping/Pong (verhindert Verbindungsabbruch bei Standby) ─────────
+  socket.on('heartbeat_ping', (_, callback) => {
+    callback?.({ pong: true, ts: Date.now() });
+  });
+
+  // ── SPIELER:IN: Rejoin nach Verbindungsverlust ──────────────────────────────
+  socket.on('player_rejoin', ({ code, nickname }, callback) => {
+    const room = rooms.get(code);
+    if (!room) return callback({ error: `Raum "${code}" nicht gefunden.` });
+    const cleanNick = (nickname || '').trim();
+    const player = room.players.get(cleanNick);
+    if (!player) return callback({ error: `Spieler:in "${cleanNick}" nicht im Raum.` });
+
+    // Update socket ID und setze connected = true
+    player.socketId = socket.id;
+    player.connected = true;
+    socketToRoom.set(socket.id, code);
+    socket.join(code);
+
+    console.log(`[Room] ${cleanNick} ist wieder verbunden in Raum ${code}.`);
+
+    // Host & Spieler benachrichtigen
+    emitPlayerList(room);
+    io.to(room.hostSocketId).emit('player_joined', { nickname: cleanNick, playerCount: room.players.size });
+
+    callback({
+      success: true,
+      state: room.state,
+      gameTitle: room.gameTitle,
+      score: player.score,
+    });
+
+    // Dem wiederverbundenen Spieler den aktuellen Zustand schicken
+    if (room.state === 'QUESTION_ASKED') {
+      const question = room.questions[room.currentQuestionIndex];
+      const hasAnswered = room.answers.has(cleanNick);
+      if (hasAnswered) {
+        // Bereits geantwortet -> Warte-Bildschirm anzeigen
+        const answerData = room.answers.get(cleanNick);
+        const optionText = {
+          a: question.option_a,
+          b: question.option_b,
+          c: question.option_c,
+          d: question.option_d
+        }[answerData.answer] || '';
+        socket.emit('rejoin_state', {
+          view: 'player-waiting',
+          chosenAnswerText: optionText,
+          questionData: {
+            index: room.currentQuestionIndex,
+            total: room.questions.length,
+            question_text: question.question_text,
+            type: question.type,
+          }
+        });
+      } else {
+        // Noch nicht geantwortet -> Frage anzeigen
+        const remainingSeconds = Math.max(0, Math.round((room.questionStartTime + room.questionTimeSeconds * 1000 - Date.now()) / 1000));
+        const questionData = {
+          index: room.currentQuestionIndex,
+          total: room.questions.length,
+          question_text: question.question_text,
+          type: question.type,
+          option_a: question.option_a,
+          option_b: question.option_b,
+          option_c: question.option_c,
+          option_d: question.option_d,
+          timeSeconds: remainingSeconds,
+        };
+        socket.emit('question', questionData);
+      }
+    } else if (room.state === 'REVEAL') {
+      socket.emit('rejoin_state', { view: 'player-waiting', message: 'Warte auf die Rangliste...' });
+    } else if (room.state === 'LEADERBOARD') {
+      const leaderboard = getLeaderboard(room);
+      socket.emit('leaderboard', { leaderboard, isFinal: false });
+    } else if (room.state === 'GAME_OVER') {
+      const leaderboard = getLeaderboard(room);
+      socket.emit('game_over', { leaderboard });
+    } else if (room.state === 'LOBBY') {
+      socket.emit('rejoin_state', { view: 'player-lobby' });
     }
   });
 
@@ -588,7 +771,7 @@ io.on('connection', (socket) => {
       return callback({ error: `Nickname "${cleanNick}" ist bereits vergeben.` });
     }
 
-    room.players.set(cleanNick, { socketId: socket.id, score: 0, answers: [] });
+    room.players.set(cleanNick, { socketId: socket.id, score: 0, answers: [], connected: true });
     socketToRoom.set(socket.id, code);
     socket.join(code);
 
@@ -614,6 +797,55 @@ io.on('connection', (socket) => {
     room.currentQuestionIndex = 0;
     sendNextQuestion(room, code);
     callback?.({ success: true });
+  });
+
+  // ── HOST: Notbremse (erzwinge Weiterschalten in jedem Zustand) ──────────────
+  socket.on('host_force_next', (_, callback) => {
+    const code = socketToRoom.get(socket.id);
+    const room = rooms.get(code);
+    if (!room) return callback?.({ error: 'Raum nicht gefunden.' });
+    if (room.hostSocketId !== socket.id) return callback?.({ error: 'Nur der Host.' });
+
+    console.log(`[Room] Host Notbremse in Raum ${code}. Aktueller Zustand: ${room.state}`);
+
+    if (room.state === 'QUESTION_ASKED') {
+      revealAnswer(room, code, 'host_forced');
+      callback?.({ success: true, nextState: 'REVEAL' });
+    } else if (room.state === 'REVEAL') {
+      room.state = 'LEADERBOARD';
+      const leaderboard = getLeaderboard(room);
+      io.to(code).emit('leaderboard', { leaderboard, isFinal: false });
+      callback?.({ success: true, nextState: 'LEADERBOARD' });
+    } else if (room.state === 'LEADERBOARD') {
+      room.currentQuestionIndex++;
+      if (room.currentQuestionIndex >= room.questions.length) {
+        room.state = 'GAME_OVER';
+        const finalLeaderboard = getLeaderboard(room);
+        io.to(code).emit('game_over', { leaderboard: finalLeaderboard });
+
+        // Ergebnis in Datenbank speichern
+        const winner = finalLeaderboard[0] ?? null;
+        dbRun(
+          `INSERT INTO game_history (game_id, game_title, player_count, winner_nickname, winner_score, results_json)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            room.gameId,
+            room.gameTitle,
+            room.players.size,
+            winner?.nickname ?? null,
+            winner?.score ?? 0,
+            JSON.stringify(finalLeaderboard),
+          ]
+        ).catch((err) => console.error('[DB] Fehler beim Speichern der Historie:', err));
+
+        callback?.({ success: true, nextState: 'GAME_OVER' });
+      } else {
+        sendNextQuestion(room, code);
+        callback?.({ success: true, nextState: 'QUESTION_ASKED' });
+      }
+    } else {
+      callback?.({ error: `Notbremse im Zustand "${room.state}" nicht möglich.` });
+    }
   });
 
   // ── HOST: Nächste Frage / Leaderboard weiter ───────────────────────────────
@@ -686,14 +918,27 @@ io.on('connection', (socket) => {
     console.log(`[Room] ${playerNickname} antwortete "${answer}" nach ${timeMs}ms`);
     callback?.({ success: true, received: true });
 
-    // Host informieren, wie viele geantwortet haben
-    io.to(room.hostSocketId).emit('answer_count', {
-      answered: room.answers.size,
-      total: room.players.size,
+    // Alle Spieler & Host informieren über den aktuellen Antwort-Status (Sync)
+    const connectedPlayers = Array.from(room.players.values()).filter(p => p.connected);
+    const connectedPlayersCount = connectedPlayers.length;
+    const answeredCount = room.answers.size;
+    const allNicknames = Array.from(room.players.keys());
+    const waitingFor = allNicknames.filter(nick => !room.answers.has(nick) && room.players.get(nick).connected);
+
+    io.to(code).emit('answer_sync', {
+      answeredCount,
+      totalCount: connectedPlayersCount,
+      waitingForNicknames: waitingFor,
     });
 
-    // Automatisch aufdecken, wenn alle geantwortet haben
-    if (room.answers.size >= room.players.size) {
+    // Host informieren (Abwärtskompatibilität)
+    io.to(room.hostSocketId).emit('answer_count', {
+      answered: answeredCount,
+      total: connectedPlayersCount,
+    });
+
+    // Automatisch aufdecken, wenn alle aktiven Spieler:innen geantwortet haben
+    if (answeredCount >= connectedPlayersCount && connectedPlayersCount > 0) {
       revealAnswer(room, code, 'all_answered');
     }
   });
@@ -739,19 +984,27 @@ io.on('connection', (socket) => {
       io.to(code).emit('game_aborted', { message: 'Die Verbindung zum Host wurde getrennt. Das Spiel wurde beendet.' });
       cleanupRoom(code);
     } else {
-      // Spieler:in trennt → Aus Liste entfernen, weiterspielen
+      // Spieler:in trennt → Aus Liste entfernen (Lobby) oder inaktiv setzen (laufendes Spiel)
       let disconnectedNick = null;
       room.players.forEach((data, nick) => {
         if (data.socketId === socket.id) disconnectedNick = nick;
       });
       if (disconnectedNick) {
-        room.players.delete(disconnectedNick);
-        console.log(`[Room] ${disconnectedNick} hat Raum ${code} verlassen.`);
+        const playerData = room.players.get(disconnectedNick);
+        if (room.state === 'LOBBY') {
+          room.players.delete(disconnectedNick);
+          console.log(`[Room] ${disconnectedNick} hat Raum ${code} verlassen (Lobby).`);
+        } else {
+          playerData.connected = false;
+          console.log(`[Room] ${disconnectedNick} hat die Verbindung verloren (Spiel läuft).`);
+        }
+        
         emitPlayerList(room);
         io.to(room.hostSocketId).emit('player_left', { nickname: disconnectedNick });
 
-        // Prüfen, ob alle übrigen Spieler:innen nun geantwortet haben
-        if (room.state === 'QUESTION_ASKED' && room.answers.size >= room.players.size && room.players.size > 0) {
+        // Prüfen, ob alle übrigen AKTIVEN Spieler:innen nun geantwortet haben
+        const connectedPlayers = Array.from(room.players.values()).filter(p => p.connected);
+        if (room.state === 'QUESTION_ASKED' && room.answers.size >= connectedPlayers.length && connectedPlayers.length > 0) {
           revealAnswer(room, code, 'all_answered');
         }
       }
@@ -767,6 +1020,7 @@ function cleanupRoom(code) {
   const room = rooms.get(code);
   if (!room) return;
   if (room.timer) clearTimeout(room.timer);
+  if (room.autoAdvanceTimer) clearTimeout(room.autoAdvanceTimer);
   room.players.forEach((data) => socketToRoom.delete(data.socketId));
   socketToRoom.delete(room.hostSocketId);
   rooms.delete(code);
