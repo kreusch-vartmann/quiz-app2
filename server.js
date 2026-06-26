@@ -1160,24 +1160,95 @@ io.on('connection', (socket) => {
   socket.on('player_join', ({ code, nickname, sessionId }, callback) => {
     const room = rooms.get(code);
     if (!room) return callback({ error: `Raum "${code}" nicht gefunden.` });
-    if (room.state !== 'LOBBY') return callback({ error: 'Das Spiel läuft bereits. Beitritt nicht mehr möglich.' });
-    if (room.players.size >= MAX_PLAYERS) return callback({ error: `Der Raum ist voll (max. ${MAX_PLAYERS} Teilnehmer:innen).` });
 
     const cleanNick = (nickname || '').trim();
     if (!cleanNick || cleanNick.length < 1 || cleanNick.length > 20) {
       return callback({ error: 'Nickname muss 1–20 Zeichen lang sein.' });
     }
-    if (room.players.has(cleanNick)) {
-      return callback({ error: `Nickname "${cleanNick}" ist bereits vergeben.` });
+
+    const validSessionId = sessionId && typeof sessionId === 'string' && /^[0-9a-f-]{36}$/.test(sessionId)
+      ? sessionId
+      : null;
+
+    // ── Impliziter Rejoin: Spieler existiert bereits und sessionId stimmt überein ──
+    const existingPlayer = room.players.get(cleanNick);
+    if (existingPlayer && validSessionId && existingPlayer.sessionId === validSessionId) {
+      console.log(`[Room] ${cleanNick} nutzt player_join als impliziten Rejoin in Raum ${code} (State: ${room.state}).`);
+
+      // Alten Socket-Eintrag bereinigen und neuen registrieren
+      socketToRoom.delete(existingPlayer.socketId);
+      existingPlayer.socketId = socket.id;
+      existingPlayer.connected = true;
+      socketToRoom.set(socket.id, code);
+      socket.join(code);
+
+      emitPlayerList(room);
+      io.to(room.hostSocketId).emit('player_joined', {
+        nickname: cleanNick,
+        playerCount: room.players.size,
+        players: Array.from(room.players.keys()),
+      });
+
+      callback({ success: true, nickname: cleanNick, gameTitle: room.gameTitle, playerCount: room.players.size, score: existingPlayer.score, state: room.state });
+
+      // State-Replay: gleiche Logik wie player_rejoin
+      if (room.state === 'QUESTION_ASKED') {
+        const question = room.questions[room.currentQuestionIndex];
+        const hasAnswered = room.answers.has(cleanNick);
+        if (hasAnswered) {
+          const answerData = room.answers.get(cleanNick);
+          const optionText = { a: question.option_a, b: question.option_b, c: question.option_c, d: question.option_d }[answerData.answer] || '';
+          socket.emit('rejoin_state', {
+            view: 'player-waiting',
+            chosenAnswerText: optionText,
+            questionData: { index: room.currentQuestionIndex, total: room.questions.length, question_text: question.question_text, type: question.type },
+          });
+        } else {
+          const questionEndTime = room.questionStartTime + room.questionTimeSeconds * 1000;
+          const remainingSeconds = Math.max(0, Math.round((questionEndTime - Date.now()) / 1000));
+          socket.emit('question', {
+            index: room.currentQuestionIndex, total: room.questions.length,
+            question_text: question.question_text, type: question.type,
+            option_a: question.option_a, option_b: question.option_b, option_c: question.option_c, option_d: question.option_d,
+            timeSeconds: remainingSeconds, endTime: questionEndTime,
+          });
+        }
+      } else if (room.state === 'REVEAL') {
+        const revealQuestion = room.questions[room.currentQuestionIndex];
+        const revealResults = {};
+        room.players.forEach((pd, nick) => {
+          const ad = room.answers.get(nick);
+          revealResults[nick] = { answer: ad?.answer ?? null, correct: ad?.answer === revealQuestion.correct_answer, points: 0, totalScore: pd.score };
+        });
+        const myRes = revealResults[cleanNick] ?? { correct: false, points: 0, totalScore: 0, answer: null };
+        socket.emit('reveal', {
+          correctAnswer: revealQuestion.correct_answer, explanation: revealQuestion.explanation || null,
+          results: revealResults, reason: 'rejoin', autoAdvance: room.autoAdvance,
+          autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_REVEAL_DELAY : null,
+          myResult: { correct: myRes.correct, points: myRes.points, totalScore: myRes.totalScore, myAnswer: myRes.answer ?? null },
+        });
+      } else if (room.state === 'LEADERBOARD') {
+        socket.emit('leaderboard', { leaderboard: getLeaderboard(room), isFinal: false });
+      } else if (room.state === 'GAME_OVER') {
+        socket.emit('game_over', buildGameOverPayload(getLeaderboard(room)));
+      } else if (room.state === 'LOBBY') {
+        socket.emit('rejoin_state', { view: 'player-lobby', playerCount: room.players.size, gameTitle: room.gameTitle });
+      }
+      return;
     }
 
-    room.players.set(cleanNick, { socketId: socket.id, sessionId: sessionId || null, score: 0, answers: [], connected: true });
+    // ── Normaler Erstbeitritt: nur in der Lobby erlaubt ──────────────────────────
+    if (room.state !== 'LOBBY') return callback({ error: 'Das Spiel läuft bereits. Beitritt nicht mehr möglich.' });
+    if (room.players.size >= MAX_PLAYERS) return callback({ error: `Der Raum ist voll (max. ${MAX_PLAYERS} Teilnehmer:innen).` });
+    if (room.players.has(cleanNick)) return callback({ error: `Nickname "${cleanNick}" ist bereits vergeben.` });
+
+    room.players.set(cleanNick, { socketId: socket.id, sessionId: validSessionId, score: 0, answers: [], connected: true });
     socketToRoom.set(socket.id, code);
     socket.join(code);
 
     // Spieler-Session im sessionStore registrieren
-    if (sessionId && typeof sessionId === 'string' && /^[0-9a-f-]{36}$/.test(sessionId)) {
-      sessionStore.set(sessionId, { roomCode: code, nickname: cleanNick, role: 'player' });
+    if (validSessionId) {
+      sessionStore.set(validSessionId, { roomCode: code, nickname: cleanNick, role: 'player' });
     }
 
     console.log(`[Room] ${cleanNick} trat Raum ${code} bei.`);
