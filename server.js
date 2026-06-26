@@ -518,12 +518,15 @@ app.get('/api/public/games', requireAdmin, async (_req, res) => {
  * @typedef {Object} Room
  * @property {string}   code                 - 4-stelliger Raumcode
  * @property {string}   hostSocketId         - Socket-ID des Hosts
+ * @property {string}   hostSessionId        - UUID-Session des Hosts (für Rejoin)
+ * @property {boolean}  hostConnected        - Ob der Host aktuell verbunden ist
+ * @property {NodeJS.Timeout|null} hostReconnectTimer - Grace-Period-Timer beim Host-Disconnect
  * @property {'LOBBY'|'QUESTION_ASKED'|'REVEAL'|'LEADERBOARD'|'GAME_OVER'} state
  * @property {number}   gameId               - ID des gewählten Quizzes
  * @property {string}   gameTitle            - Titel des Quizzes
  * @property {Array}    questions            - Alle Fragen des Quizzes (ggf. gemischt)
  * @property {number}   currentQuestionIndex - Index in questions[]
- * @property {Map}      players              - nickname → { socketId, score, answers[] }
+ * @property {Map}      players              - nickname → { socketId, sessionId, score, answers[], connected }
  * @property {Map}      answers              - Antworten für aktuelle Frage: nickname → { answer, timeMs }
  * @property {NodeJS.Timeout|null} timer
  * @property {NodeJS.Timeout|null} autoAdvanceTimer - Timer für Auto-Weiterschaltung
@@ -539,6 +542,14 @@ const rooms = new Map();
 
 /** @type {Map<string, string>} Zuordnung socketId → Raumcode */
 const socketToRoom = new Map();
+
+/**
+ * Session-Store: UUID → { roomCode, nickname, role }
+ * Ermöglicht das Wiederfinden eines Spielers/Hosts nach Verbindungsabbruch
+ * anhand einer unveränderlichen Session-ID statt socketId.
+ * @type {Map<string, { roomCode: string, nickname: string|null, role: 'player'|'host' }>}
+ */
+const sessionStore = new Map();
 
 /** Generiert einen zufälligen 4-stelligen Raumcode (1000–9999) */
 function generateRoomCode() {
@@ -812,7 +823,7 @@ io.on('connection', (socket) => {
   console.log(`[Socket] Verbunden: ${socket.id}`);
 
   // ── HOST: Raum erstellen ────────────────────────────────────────────────────
-  socket.on('host_create_room', async ({ gameId, options }, callback) => {
+  socket.on('host_create_room', async ({ gameId, options, hostSessionId }, callback) => {
     try {
       const game = await dbGet('SELECT * FROM games WHERE id = ?', [gameId]);
       if (!game) return callback({ error: 'Quiz nicht gefunden.' });
@@ -847,10 +858,18 @@ io.on('connection', (socket) => {
       }
 
       const code = generateRoomCode();
+      // Host-Session validieren (UUID-Format) oder verwerfen
+      const validHostSessionId = (typeof hostSessionId === 'string' && /^[0-9a-f-]{36}$/.test(hostSessionId))
+        ? hostSessionId
+        : null;
+
       /** @type {Room} */
       const room = {
         code,
         hostSocketId: socket.id,
+        hostSessionId: validHostSessionId,
+        hostConnected: true,
+        hostReconnectTimer: null,
         state: 'LOBBY',
         gameId: game.id,
         gameTitle: game.title,
@@ -870,6 +889,11 @@ io.on('connection', (socket) => {
       rooms.set(code, room);
       socketToRoom.set(socket.id, code);
       socket.join(code);
+
+      // Host-Session im sessionStore registrieren
+      if (validHostSessionId) {
+        sessionStore.set(validHostSessionId, { roomCode: code, nickname: null, role: 'host' });
+      }
 
       console.log(`[Room] Erstellt: ${code} (Quiz: "${game.title}", ${questions.length} Fragen${maxQuestions > 0 ? ` [limit=${maxQuestions}]` : ''}, ${questionTimeSeconds}s, shuffle=${shuffleQuestions}, auto=${autoAdvance})`);
       callback({
@@ -898,24 +922,40 @@ io.on('connection', (socket) => {
   });
 
   // ── SPIELER:IN: Rejoin nach Verbindungsverlust ──────────────────────────────
-  socket.on('player_rejoin', ({ code, nickname }, callback) => {
-    const room = rooms.get(code);
-    if (!room) return callback({ error: `Raum "${code}" nicht gefunden.` });
-    const cleanNick = (nickname || '').trim();
+  socket.on('player_rejoin', ({ code, nickname, sessionId }, callback) => {
+    let resolvedCode = code;
+    let resolvedNick = (nickname || '').trim();
+
+    // Primär: Lookup via sessionId (sicherer, unveränderlich)
+    if (sessionId && typeof sessionId === 'string' && /^[0-9a-f-]{36}$/.test(sessionId)) {
+      const session = sessionStore.get(sessionId);
+      if (session && session.role === 'player') {
+        resolvedCode = session.roomCode;
+        resolvedNick = session.nickname;
+      }
+    }
+
+    const room = rooms.get(resolvedCode);
+    if (!room) return callback({ error: `Raum "${resolvedCode}" nicht gefunden.` });
+    const cleanNick = resolvedNick;
     const player = room.players.get(cleanNick);
     if (!player) return callback({ error: `Spieler:in "${cleanNick}" nicht im Raum.` });
 
     // Update socket ID und setze connected = true
     player.socketId = socket.id;
     player.connected = true;
-    socketToRoom.set(socket.id, code);
-    socket.join(code);
+    socketToRoom.set(socket.id, resolvedCode);
+    socket.join(resolvedCode);
 
-    console.log(`[Room] ${cleanNick} ist wieder verbunden in Raum ${code}.`);
+    console.log(`[Room] ${cleanNick} ist wieder verbunden in Raum ${resolvedCode}.`);
 
     // Host & Spieler benachrichtigen
     emitPlayerList(room);
-    io.to(room.hostSocketId).emit('player_joined', { nickname: cleanNick, playerCount: room.players.size });
+    io.to(room.hostSocketId).emit('player_joined', {
+      nickname: cleanNick,
+      playerCount: room.players.size,
+      players: Array.from(room.players.keys()),
+    });
 
     callback({
       success: true,
@@ -1000,12 +1040,124 @@ io.on('connection', (socket) => {
       const leaderboard = getLeaderboard(room);
       socket.emit('game_over', buildGameOverPayload(leaderboard));
     } else if (room.state === 'LOBBY') {
-      socket.emit('rejoin_state', { view: 'player-lobby' });
+      socket.emit('rejoin_state', {
+        view: 'player-lobby',
+        playerCount: room.players.size,
+        gameTitle: room.gameTitle,
+      });
+    }
+  });
+
+  // ── HOST: Rejoin nach Verbindungsverlust ────────────────────────────────────
+  socket.on('host_rejoin', ({ hostSessionId }, callback) => {
+    // Session-ID validieren
+    if (!hostSessionId || typeof hostSessionId !== 'string' || !/^[0-9a-f-]{36}$/.test(hostSessionId)) {
+      return callback({ error: 'Ungültige Session-ID.' });
+    }
+
+    const session = sessionStore.get(hostSessionId);
+    if (!session || session.role !== 'host') {
+      return callback({ error: 'Host-Session nicht gefunden oder abgelaufen.' });
+    }
+
+    const room = rooms.get(session.roomCode);
+    if (!room) {
+      sessionStore.delete(hostSessionId);
+      return callback({ error: `Raum "${session.roomCode}" nicht mehr aktiv.` });
+    }
+
+    // Grace-Period-Timer abbrechen, falls noch läuft
+    if (room.hostReconnectTimer) {
+      clearTimeout(room.hostReconnectTimer);
+      room.hostReconnectTimer = null;
+    }
+
+    // Alten Host-Socket aus socketToRoom entfernen
+    socketToRoom.delete(room.hostSocketId);
+
+    // Raum auf neue Socket-ID aktualisieren
+    room.hostSocketId = socket.id;
+    room.hostConnected = true;
+    socketToRoom.set(socket.id, session.roomCode);
+    socket.join(session.roomCode);
+
+    console.log(`[Room] Host ist wieder verbunden in Raum ${session.roomCode}.`);
+
+    // Alle Spieler informieren (Verbindung wieder da)
+    io.to(session.roomCode).emit('host_reconnected');
+
+    callback({
+      success: true,
+      state: room.state,
+      gameTitle: room.gameTitle,
+      roomCode: session.roomCode,
+      questionCount: room.questions.length,
+      currentQuestionIndex: room.currentQuestionIndex,
+      questionTimeSeconds: room.questionTimeSeconds,
+      autoAdvance: room.autoAdvance,
+    });
+
+    // Spielstand via Events wiederherstellen (konsistent mit normalem Spielfluss)
+    if (room.state === 'LOBBY') {
+      const players = Array.from(room.players.entries()).map(([nick, d]) => ({ nickname: nick, score: d.score, connected: d.connected }));
+      socket.emit('player_list', { players });
+
+    } else if (room.state === 'QUESTION_ASKED') {
+      const question = room.questions[room.currentQuestionIndex];
+      const questionEndTime = room.questionStartTime + room.questionTimeSeconds * 1000;
+      const remainingSeconds = Math.max(0, Math.round((questionEndTime - Date.now()) / 1000));
+      socket.emit('question', {
+        index: room.currentQuestionIndex,
+        total: room.questions.length,
+        question_text: question.question_text,
+        type: question.type,
+        option_a: question.option_a,
+        option_b: question.option_b,
+        option_c: question.option_c,
+        option_d: question.option_d,
+        timeSeconds: remainingSeconds,
+        endTime: questionEndTime,
+        answeredCount: room.answers.size,
+        totalCount: room.players.size,
+      });
+
+    } else if (room.state === 'REVEAL') {
+      const revealQuestion = room.questions[room.currentQuestionIndex];
+      const revealResults = {};
+      room.players.forEach((pd, nick) => {
+        const ad = room.answers.get(nick);
+        revealResults[nick] = {
+          answer:     ad?.answer ?? null,
+          correct:    ad?.answer === revealQuestion.correct_answer,
+          points:     pd.score,
+          totalScore: pd.score,
+        };
+      });
+      socket.emit('reveal', {
+        correctAnswer: revealQuestion.correct_answer,
+        explanation:   revealQuestion.explanation || null,
+        results:       revealResults,
+        reason:        'rejoin',
+        autoAdvance:   room.autoAdvance,
+        autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_REVEAL_DELAY : null,
+      });
+
+    } else if (room.state === 'LEADERBOARD') {
+      const leaderboard = getLeaderboard(room);
+      socket.emit('leaderboard', {
+        leaderboard,
+        isFinal: false,
+        autoAdvance: room.autoAdvance,
+        autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_LB_DELAY : null,
+      });
+
+    } else if (room.state === 'GAME_OVER') {
+      socket.emit('game_over', buildGameOverPayload(getLeaderboard(room)));
     }
   });
 
   // ── SPIELER:IN: Raum beitreten ──────────────────────────────────────────────
-  socket.on('player_join', ({ code, nickname }, callback) => {
+  socket.on('player_join', ({ code, nickname, sessionId }, callback) => {
     const room = rooms.get(code);
     if (!room) return callback({ error: `Raum "${code}" nicht gefunden.` });
     if (room.state !== 'LOBBY') return callback({ error: 'Das Spiel läuft bereits. Beitritt nicht mehr möglich.' });
@@ -1019,17 +1171,26 @@ io.on('connection', (socket) => {
       return callback({ error: `Nickname "${cleanNick}" ist bereits vergeben.` });
     }
 
-    room.players.set(cleanNick, { socketId: socket.id, score: 0, answers: [], connected: true });
+    room.players.set(cleanNick, { socketId: socket.id, sessionId: sessionId || null, score: 0, answers: [], connected: true });
     socketToRoom.set(socket.id, code);
     socket.join(code);
+
+    // Spieler-Session im sessionStore registrieren
+    if (sessionId && typeof sessionId === 'string' && /^[0-9a-f-]{36}$/.test(sessionId)) {
+      sessionStore.set(sessionId, { roomCode: code, nickname: cleanNick, role: 'player' });
+    }
 
     console.log(`[Room] ${cleanNick} trat Raum ${code} bei.`);
 
     // Host benachrichtigen
     emitPlayerList(room);
-    io.to(room.hostSocketId).emit('player_joined', { nickname: cleanNick, playerCount: room.players.size });
+    io.to(room.hostSocketId).emit('player_joined', {
+      nickname: cleanNick,
+      playerCount: room.players.size,
+      players: Array.from(room.players.keys()),
+    });
 
-    callback({ success: true, nickname: cleanNick, gameTitle: room.gameTitle });
+    callback({ success: true, nickname: cleanNick, gameTitle: room.gameTitle, playerCount: room.players.size });
   });
 
   // ── HOST: Quiz starten ──────────────────────────────────────────────────────
@@ -1190,11 +1351,22 @@ io.on('connection', (socket) => {
     socketToRoom.delete(socket.id);
 
     if (room.hostSocketId === socket.id) {
-      // Host trennt → Spiel abbrechen
-      console.log(`[Room] Host von ${code} getrennt. Raum wird aufgelöst.`);
-      if (room.timer) clearTimeout(room.timer);
-      io.to(code).emit('game_aborted', { message: 'Die Verbindung zum Host wurde getrennt. Das Spiel wurde beendet.' });
-      cleanupRoom(code);
+      // Host trennt → Grace-Period starten (30s), danach Raum auflösen
+      console.log(`[Room] Host von ${code} getrennt. Grace-Period startet (30s).`);
+      room.hostConnected = false;
+
+      // Spieler informieren, dass der Host kurz weg ist
+      io.to(code).emit('host_disconnected', { gracePeriodSeconds: 30 });
+
+      room.hostReconnectTimer = setTimeout(() => {
+        // Kein Rejoin innerhalb 30s → Spiel abbrechen
+        const currentRoom = rooms.get(code);
+        if (!currentRoom || currentRoom.hostConnected) return; // Bereits wieder verbunden
+        console.log(`[Room] Host von ${code} nicht zurückgekehrt. Raum wird aufgelöst.`);
+        if (currentRoom.timer) clearTimeout(currentRoom.timer);
+        io.to(code).emit('game_aborted', { message: 'Die Verbindung zum Host wurde dauerhaft getrennt. Das Spiel wurde beendet.' });
+        cleanupRoom(code);
+      }, 30000);
     } else {
       // Spieler:in trennt → Aus Liste entfernen (Lobby) oder inaktiv setzen (laufendes Spiel)
       let disconnectedNick = null;
@@ -1233,8 +1405,14 @@ function cleanupRoom(code) {
   if (!room) return;
   if (room.timer) clearTimeout(room.timer);
   if (room.autoAdvanceTimer) clearTimeout(room.autoAdvanceTimer);
-  room.players.forEach((data) => socketToRoom.delete(data.socketId));
+  if (room.hostReconnectTimer) clearTimeout(room.hostReconnectTimer);
+  // Session-Einträge für alle Spieler:innen und den Host entfernen
+  room.players.forEach((data) => {
+    socketToRoom.delete(data.socketId);
+    if (data.sessionId) sessionStore.delete(data.sessionId);
+  });
   socketToRoom.delete(room.hostSocketId);
+  if (room.hostSessionId) sessionStore.delete(room.hostSessionId);
   rooms.delete(code);
   console.log(`[Room] Raum ${code} aufgelöst.`);
 }
