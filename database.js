@@ -82,9 +82,18 @@ function initializeDatabase() {
           player_count     INTEGER  DEFAULT 0,
           winner_nickname  TEXT,
           winner_score     INTEGER  DEFAULT 0,
-          results_json     TEXT
+          results_json     TEXT,
+          history_json     TEXT
         )
       `);
+
+      // ── Migration: history_json zu bestehenden DBs hinzufügen ───────────────
+      // ALTER TABLE ignoriert Fehler wenn Spalte bereits existiert
+      db.run(`ALTER TABLE game_history ADD COLUMN history_json TEXT`, (err) => {
+        if (err && !err.message.includes('duplicate column name')) {
+          console.error('[DB] Migration history_json:', err.message);
+        }
+      });
 
       // ── Tabelle: sessions ───────────────────────────────────────────────────
       // express-session Speicher-Tabelle (connect-sqlite3 Alternative als raw SQL)

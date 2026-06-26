@@ -342,6 +342,32 @@ app.get('/api/history', requireAdmin, async (_req, res) => {
   }
 });
 
+// ── Detaillierte Statistik für eine abgeschlossene Runde ──────────────────────
+app.get('/api/admin/stats/:historyId', requireAdmin, async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM game_history WHERE id = ?', [req.params.historyId]);
+    if (!row) return res.status(404).json({ error: 'Kein Eintrag mit dieser ID gefunden.' });
+
+    const leaderboard = row.results_json ? JSON.parse(row.results_json) : [];
+    const questionHistory = row.history_json ? JSON.parse(row.history_json) : [];
+
+    res.json({
+      id: row.id,
+      game_id: row.game_id,
+      game_title: row.game_title,
+      played_at: row.played_at,
+      player_count: row.player_count,
+      winner_nickname: row.winner_nickname,
+      winner_score: row.winner_score,
+      leaderboard,
+      questionHistory,
+    });
+  } catch (err) {
+    console.error('[API] GET /api/admin/stats/:historyId:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Liste der verfügbaren Quizzes für Host ────────────────────────────────────
 // (öffentlich – der Host wählt nach Login im Frontend)
 app.get('/api/public/games', requireAdmin, async (_req, res) => {
@@ -386,6 +412,7 @@ app.get('/api/public/games', requireAdmin, async (_req, res) => {
  * @property {number}   questionTimeSeconds  - Konfigurierte Antwortzeit
  * @property {boolean}  shuffleQuestions     - Fragen zufällig mischen
  * @property {boolean}  autoAdvance          - Automatisch weiterschalten
+ * @property {Array}    questionHistory      - Verlauf: pro Frage wer was richtig/falsch beantwortet hat
  */
 
 /** @type {Map<string, Room>} */
@@ -441,6 +468,49 @@ function getLeaderboard(room) {
     .map(([nickname, data]) => ({ nickname, score: data.score }))
     .sort((a, b) => b.score - a.score)
     .map((entry, index) => ({ ...entry, rank: index + 1 }));
+}
+
+/**
+ * Baut das strukturierte GAME_OVER-Payload auf (Leaderboard + Top-3-Medaillen).
+ * @param {Array<{nickname: string, score: number, rank: number}>} leaderboard
+ * @returns {{ leaderboard: Array, top3: Array }}
+ */
+function buildGameOverPayload(leaderboard) {
+  const medals = ['🥇', '🥈', '🥉'];
+  const top3 = leaderboard
+    .filter((e) => e.rank <= 3)
+    .map((e) => ({ rank: e.rank, medal: medals[e.rank - 1], nickname: e.nickname, score: e.score }));
+  return { leaderboard, top3 };
+}
+
+/**
+ * Beendet das Spiel: emittiert game_over an alle Clients und persistiert das Ergebnis.
+ * Wird von allen drei GAME_OVER-Pfaden aufgerufen.
+ * @param {Room}   room
+ * @param {string} roomCode
+ */
+function triggerGameOver(room, roomCode) {
+  room.state = 'GAME_OVER';
+  const finalLeaderboard = getLeaderboard(room);
+  const payload = buildGameOverPayload(finalLeaderboard);
+
+  io.to(roomCode).emit('game_over', payload);
+
+  const winner = finalLeaderboard[0] ?? null;
+  dbRun(
+    `INSERT INTO game_history
+       (game_id, game_title, player_count, winner_nickname, winner_score, results_json, history_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      room.gameId,
+      room.gameTitle,
+      room.players.size,
+      winner?.nickname ?? null,
+      winner?.score ?? 0,
+      JSON.stringify(finalLeaderboard),
+      JSON.stringify(room.questionHistory),
+    ]
+  ).catch((err) => console.error('[DB] Fehler beim Speichern der Historie:', err));
 }
 
 /**
@@ -507,6 +577,19 @@ function revealAnswer(room, roomCode, reason) {
     };
   });
 
+  // Frageverlauf für Admin-Historie festhalten
+  room.questionHistory.push({
+    questionIndex: room.currentQuestionIndex,
+    questionText: question.question_text,
+    correctAnswer,
+    results: Object.fromEntries(
+      Object.entries(results).map(([nick, r]) => [
+        nick,
+        { answer: r.answer, correct: r.correct, points: r.points },
+      ])
+    ),
+  });
+
   // An alle im Raum senden
   io.to(roomCode).emit('reveal', {
     correctAnswer,
@@ -553,15 +636,7 @@ function revealAnswer(room, roomCode, reason) {
         if (!r || r.state !== 'LEADERBOARD') return;
         r.currentQuestionIndex++;
         if (r.currentQuestionIndex >= r.questions.length) {
-          r.state = 'GAME_OVER';
-          const finalLb = getLeaderboard(r);
-          io.to(roomCode).emit('game_over', { leaderboard: finalLb });
-          const winner = finalLb[0] ?? null;
-          dbRun(
-            `INSERT INTO game_history (game_id, game_title, player_count, winner_nickname, winner_score, results_json)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [r.gameId, r.gameTitle, r.players.size, winner?.nickname ?? null, winner?.score ?? 0, JSON.stringify(finalLb)]
-          ).catch(err => console.error('[DB] Fehler beim Speichern der Historie:', err));
+          triggerGameOver(r, roomCode);
         } else {
           sendNextQuestion(r, roomCode);
         }
@@ -650,6 +725,7 @@ io.on('connection', (socket) => {
         questionTimeSeconds,
         shuffleQuestions,
         autoAdvance,
+        questionHistory: [],
       };
 
       rooms.set(code, room);
@@ -750,7 +826,7 @@ io.on('connection', (socket) => {
       socket.emit('leaderboard', { leaderboard, isFinal: false });
     } else if (room.state === 'GAME_OVER') {
       const leaderboard = getLeaderboard(room);
-      socket.emit('game_over', { leaderboard });
+      socket.emit('game_over', buildGameOverPayload(leaderboard));
     } else if (room.state === 'LOBBY') {
       socket.emit('rejoin_state', { view: 'player-lobby' });
     }
@@ -819,25 +895,7 @@ io.on('connection', (socket) => {
     } else if (room.state === 'LEADERBOARD') {
       room.currentQuestionIndex++;
       if (room.currentQuestionIndex >= room.questions.length) {
-        room.state = 'GAME_OVER';
-        const finalLeaderboard = getLeaderboard(room);
-        io.to(code).emit('game_over', { leaderboard: finalLeaderboard });
-
-        // Ergebnis in Datenbank speichern
-        const winner = finalLeaderboard[0] ?? null;
-        dbRun(
-          `INSERT INTO game_history (game_id, game_title, player_count, winner_nickname, winner_score, results_json)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            room.gameId,
-            room.gameTitle,
-            room.players.size,
-            winner?.nickname ?? null,
-            winner?.score ?? 0,
-            JSON.stringify(finalLeaderboard),
-          ]
-        ).catch((err) => console.error('[DB] Fehler beim Speichern der Historie:', err));
-
+        triggerGameOver(room, code);
         callback?.({ success: true, nextState: 'GAME_OVER' });
       } else {
         sendNextQuestion(room, code);
@@ -867,25 +925,7 @@ io.on('connection', (socket) => {
       room.currentQuestionIndex++;
       if (room.currentQuestionIndex >= room.questions.length) {
         // ── GAME OVER ──────────────────────────────────────────────────────
-        room.state = 'GAME_OVER';
-        const finalLeaderboard = getLeaderboard(room);
-        io.to(code).emit('game_over', { leaderboard: finalLeaderboard });
-
-        // Ergebnis in Datenbank speichern
-        const winner = finalLeaderboard[0] ?? null;
-        dbRun(
-          `INSERT INTO game_history (game_id, game_title, player_count, winner_nickname, winner_score, results_json)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            room.gameId,
-            room.gameTitle,
-            room.players.size,
-            winner?.nickname ?? null,
-            winner?.score ?? 0,
-            JSON.stringify(finalLeaderboard),
-          ]
-        ).catch((err) => console.error('[DB] Fehler beim Speichern der Historie:', err));
-
+        triggerGameOver(room, code);
         callback?.({ success: true, state: 'GAME_OVER' });
       } else {
         sendNextQuestion(room, code);
