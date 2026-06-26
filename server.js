@@ -590,29 +590,39 @@ function revealAnswer(room, roomCode, reason) {
     ),
   });
 
-  // An alle im Raum senden
-  io.to(roomCode).emit('reveal', {
+  // An alle im Raum senden – jede:r Client erhält zusätzlich sein/ihr
+  // persönliches Ergebnis (myResult), sodass ein zweites player_feedback-Event
+  // nicht mehr nötig ist.
+  const broadcastBase = {
     correctAnswer,
     explanation: question.explanation || null,
     results,
     reason,
     autoAdvance: room.autoAdvance,
     autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_REVEAL_DELAY : null,
-  });
+  };
 
-  // Individuelles Feedback an jede:n Spieler:in
   room.players.forEach((playerData, nickname) => {
     const socket = io.sockets.sockets.get(playerData.socketId);
     if (socket) {
       const res = results[nickname];
-      socket.emit('player_feedback', {
-        correct: res.correct,
-        points: res.points,
-        totalScore: res.totalScore,
-        correctAnswer,
+      socket.emit('reveal', {
+        ...broadcastBase,
+        myResult: {
+          correct: res.correct,
+          points: res.points,
+          totalScore: res.totalScore,
+          myAnswer: res.answer,
+        },
       });
     }
   });
+
+  // Host bekommt das reveal-Event ohne myResult (alle Ergebnisse via results)
+  const hostSocket = io.sockets.sockets.get(room.hostSocketId);
+  if (hostSocket) {
+    hostSocket.emit('reveal', broadcastBase);
+  }
 
   // ── Auto-Advance: nach Reveal automatisch zur Rangliste weiterschalten ──────
   if (room.autoAdvance) {
@@ -829,7 +839,33 @@ io.on('connection', (socket) => {
         socket.emit('question', questionData);
       }
     } else if (room.state === 'REVEAL') {
-      socket.emit('rejoin_state', { view: 'player-waiting', message: 'Warte auf die Rangliste...' });
+      // Spieler:in bekommt sofort die vollständige Reveal-Ansicht
+      const revealQuestion = room.questions[room.currentQuestionIndex];
+      const revealResults  = {};
+      room.players.forEach((pd, nick) => {
+        const ad = room.answers.get(nick);
+        revealResults[nick] = {
+          answer:     ad?.answer ?? null,
+          correct:    ad?.answer === revealQuestion.correct_answer,
+          points:     0, // Punkte wurden bereits vergeben; für Rejoin nicht neu berechnen
+          totalScore: pd.score,
+        };
+      });
+      const myRes = revealResults[cleanNick] ?? { correct: false, points: 0, totalScore: 0, myAnswer: null };
+      socket.emit('reveal', {
+        correctAnswer: revealQuestion.correct_answer,
+        explanation:   revealQuestion.explanation || null,
+        results:       revealResults,
+        reason:        'rejoin',
+        autoAdvance:   room.autoAdvance,
+        autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_REVEAL_DELAY : null,
+        myResult: {
+          correct:    myRes.correct,
+          points:     myRes.points,
+          totalScore: myRes.totalScore,
+          myAnswer:   myRes.answer ?? null,
+        },
+      });
     } else if (room.state === 'LEADERBOARD') {
       const leaderboard = getLeaderboard(room);
       socket.emit('leaderboard', { leaderboard, isFinal: false });

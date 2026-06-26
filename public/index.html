@@ -313,24 +313,6 @@
       100% { content: ''; }
     }
 
-    /* ── Feedback-Overlay ───────────────────────────────────── */
-    #player-feedback-overlay {
-      position: fixed;
-      inset: 0;
-      z-index: 1000;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-    #player-feedback-overlay.visible {
-      opacity: 1;
-      pointer-events: auto;
-    }
-
     /* ── Modal ──────────────────────────────────────────────── */
     .modal-backdrop {
       position: fixed;
@@ -375,17 +357,7 @@
 ═══════════════════════════════════════════════════════════════════════════ -->
 <div id="toast-container" role="alert" aria-live="polite"></div>
 
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     SPIELER:IN: FEEDBACK-OVERLAY
-═══════════════════════════════════════════════════════════════════════════ -->
-<div id="player-feedback-overlay">
-  <div id="feedback-card" class="glass p-8 text-center animate-pop" style="max-width:340px;width:90%;">
-    <div id="feedback-icon" class="text-7xl mb-4">✅</div>
-    <div id="feedback-title" class="text-3xl font-black mb-2">Richtig!</div>
-    <div id="feedback-points" class="text-5xl font-black text-yellow-400 mb-2">+850</div>
-    <div id="feedback-total"  class="text-lg text-white/70">Gesamt: 1.250 Punkte</div>
-  </div>
-</div>
+
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
      VIEW: STARTSEITE / ROLLENAUSWAHL
@@ -898,6 +870,38 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
+     VIEW: SPIELER:IN AUFLÖSUNG
+═══════════════════════════════════════════════════════════════════════════ -->
+<div data-view="player-reveal" class="min-h-screen flex flex-col items-center justify-center p-6">
+  <div class="animate-pop w-full max-w-sm mx-auto">
+    <!-- Richtig/Falsch-Header -->
+    <div id="pr-result-box" class="rounded-2xl p-6 mb-4 text-center">
+      <div id="pr-icon" class="text-6xl mb-2">✅</div>
+      <div id="pr-title" class="text-3xl font-black mb-1">Richtig!</div>
+      <div id="pr-points" class="text-4xl font-black text-yellow-400 mb-1">+850</div>
+      <div id="pr-total" class="text-base text-white/70">Gesamt: 1.250 Punkte</div>
+    </div>
+    <!-- Antwort-Details -->
+    <div class="glass p-4 rounded-2xl space-y-3 mb-4">
+      <div class="flex justify-between items-center">
+        <span class="text-white/60 text-sm">Deine Antwort</span>
+        <span id="pr-my-answer" class="font-black text-lg">–</span>
+      </div>
+      <div class="flex justify-between items-center">
+        <span class="text-white/60 text-sm">Richtige Antwort</span>
+        <span id="pr-correct-answer" class="font-black text-lg text-green-400">–</span>
+      </div>
+    </div>
+    <!-- Erklärung (optional) -->
+    <div id="pr-explanation-box" class="glass p-4 rounded-2xl hidden">
+      <p class="text-white/50 text-xs uppercase tracking-widest mb-2">Erklärung</p>
+      <p id="pr-explanation-text" class="text-white/90 text-sm leading-relaxed"></p>
+    </div>
+    <p class="text-center text-white/40 text-sm mt-5 waiting-dots">Warte auf die Rangliste</p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
      VIEW: SPIELER:IN LEADERBOARD
 ═══════════════════════════════════════════════════════════════════════════ -->
 <div data-view="player-leaderboard" class="min-h-screen flex flex-col p-4">
@@ -998,7 +1002,7 @@ function initSocket() {
     stopHeartbeat();
     
     // Wenn in einem aktiven Spiel, zeige einen Reconnecting-Toast statt sofort abzubauen
-    if (['player-lobby','player-question','player-waiting','player-leaderboard'].includes(state.currentView)) {
+    if (['player-lobby','player-question','player-waiting','player-reveal','player-leaderboard'].includes(state.currentView)) {
       showToast('Verbindung unterbrochen. Versuche wiederzuverbinden… ⏳', 'warning', 4000);
       
       // Nach 10 Sekunden Abbruch zeigen
@@ -1030,10 +1034,6 @@ function initSocket() {
     showPlayerQuestion(data);
   });
 
-  state.socket.on('player_feedback', (data) => {
-    if (!isHost()) showPlayerFeedback(data);
-  });
-
   state.socket.on('reveal', (data) => {
     if (isHost()) {
       stopHostTimer();
@@ -1041,7 +1041,7 @@ function initSocket() {
       return;
     }
     stopPlayerTimer();
-    // Spieler:in sieht "Warte auf Auflösung" – Feedback kam bereits via player_feedback
+    showPlayerReveal(data);
   });
 
   state.socket.on('leaderboard', (data) => {
@@ -1975,35 +1975,54 @@ function submitAnswer(key, text) {
   });
 }
 
-// ── SPIELER:IN: Feedback ──────────────────────────────────────────────────────
-function showPlayerFeedback(data) {
-  const overlay = document.getElementById('player-feedback-overlay');
-  const icon    = document.getElementById('feedback-icon');
-  const title   = document.getElementById('feedback-title');
-  const points  = document.getElementById('feedback-points');
-  const total   = document.getElementById('feedback-total');
+// ── SPIELER:IN: Auflösung anzeigen ───────────────────────────────────────────
+function showPlayerReveal(data) {
+  const my = data.myResult ?? {};
 
-  if (data.correct) {
+  const resultBox = document.getElementById('pr-result-box');
+  const icon      = document.getElementById('pr-icon');
+  const title     = document.getElementById('pr-title');
+  const points    = document.getElementById('pr-points');
+  const total     = document.getElementById('pr-total');
+  const myAns     = document.getElementById('pr-my-answer');
+  const corrAns   = document.getElementById('pr-correct-answer');
+  const expBox    = document.getElementById('pr-explanation-box');
+  const expText   = document.getElementById('pr-explanation-text');
+
+  const correct = my.correct ?? false;
+
+  if (correct) {
+    resultBox.style.background = 'rgba(39,174,96,0.25)';
+    resultBox.style.border     = '2px solid rgba(39,174,96,0.5)';
     icon.textContent  = '✅';
     title.textContent = 'Richtig!';
     title.style.color = '#2ecc71';
-    overlay.style.background = 'rgba(39,174,96,0.85)';
   } else {
+    resultBox.style.background = 'rgba(231,76,60,0.25)';
+    resultBox.style.border     = '2px solid rgba(231,76,60,0.5)';
     icon.textContent  = '❌';
     title.textContent = 'Falsch!';
     title.style.color = '#e74c3c';
-    overlay.style.background = 'rgba(231,76,60,0.85)';
   }
 
-  points.textContent = data.points > 0 ? `+${data.points}` : '0';
-  total.textContent  = `Gesamt: ${data.totalScore} Punkte`;
+  const pts = my.points ?? 0;
+  points.textContent = pts > 0 ? `+${pts}` : '0';
+  total.textContent  = `Gesamt: ${my.totalScore ?? 0} Punkte`;
 
-  overlay.classList.add('visible');
+  myAns.textContent   = my.myAnswer   ? OPTION_LABELS[my.myAnswer]   : '–';
+  corrAns.textContent = data.correctAnswer ? OPTION_LABELS[data.correctAnswer] : '–';
 
-  // Overlay nach 2.5s ausblenden
-  setTimeout(() => {
-    overlay.classList.remove('visible');
-  }, 2500);
+  // Eigene Antwort einfärben
+  myAns.style.color = correct ? '#2ecc71' : '#e74c3c';
+
+  if (data.explanation) {
+    expText.textContent = data.explanation;
+    expBox.classList.remove('hidden');
+  } else {
+    expBox.classList.add('hidden');
+  }
+
+  showView('player-reveal');
 }
 
 // ── SPIELER:IN: Leaderboard ────────────────────────────────────────────────────
