@@ -701,10 +701,19 @@ io.on('connection', (socket) => {
         : DEFAULT_QUESTION_TIME;
       const shuffleQuestions = options?.shuffle === true;
       const autoAdvance      = options?.autoAdvance === true;
+      const maxQuestionsRaw  = Number(options?.maxQuestions) || 0;
+      const maxQuestions     = Number.isInteger(maxQuestionsRaw) && maxQuestionsRaw > 0
+        ? maxQuestionsRaw
+        : 0; // 0 = alle Fragen
 
       // Fragen mischen (Kopie erstellen, Original in DB unberührt)
       if (shuffleQuestions) {
         questions = shuffleArray([...questions]);
+      }
+
+      // Fragenanzahl begrenzen (nach dem Mischen, damit die Auswahl zufällig bleibt)
+      if (maxQuestions > 0 && maxQuestions < questions.length) {
+        questions = questions.slice(0, maxQuestions);
       }
 
       const code = generateRoomCode();
@@ -732,7 +741,7 @@ io.on('connection', (socket) => {
       socketToRoom.set(socket.id, code);
       socket.join(code);
 
-      console.log(`[Room] Erstellt: ${code} (Quiz: "${game.title}", ${questions.length} Fragen, ${questionTimeSeconds}s, shuffle=${shuffleQuestions}, auto=${autoAdvance})`);
+      console.log(`[Room] Erstellt: ${code} (Quiz: "${game.title}", ${questions.length} Fragen${maxQuestions > 0 ? ` [limit=${maxQuestions}]` : ''}, ${questionTimeSeconds}s, shuffle=${shuffleQuestions}, auto=${autoAdvance})`);
       callback({
         success: true,
         code,

@@ -542,7 +542,7 @@
         </select>
       </div>
       <!-- Optionen-Reihe -->
-      <div class="grid sm:grid-cols-3 gap-3 mt-3">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
         <!-- Antwortzeit -->
         <div>
           <label class="text-white/60 text-xs font-semibold block mb-1">⏱️ Antwortzeit</label>
@@ -567,6 +567,19 @@
           <select id="host-shuffle" class="form-input">
             <option value="no">Feste Reihenfolge</option>
             <option value="yes">Zufällig mischen</option>
+          </select>
+        </div>
+        <!-- Anzahl Fragen -->
+        <div>
+          <label class="text-white/60 text-xs font-semibold block mb-1">🔢 Anzahl Fragen</label>
+          <select id="host-max-questions" class="form-input">
+            <option value="0">Alle Fragen</option>
+            <option value="5">5 Fragen</option>
+            <option value="10">10 Fragen</option>
+            <option value="15">15 Fragen</option>
+            <option value="20">20 Fragen</option>
+            <option value="25">25 Fragen</option>
+            <option value="30">30 Fragen</option>
           </select>
         </div>
       </div>
@@ -1550,13 +1563,15 @@ async function createRoom() {
   const questionTime  = parseInt(document.getElementById('host-question-time').value) || 20;
   const advanceMode   = document.getElementById('host-advance-mode').value;   // 'manual' | 'auto'
   const shuffleVal    = document.getElementById('host-shuffle').value;         // 'yes' | 'no'
+  const maxQuestions  = parseInt(document.getElementById('host-max-questions').value) || 0; // 0 = alle
 
   initSocket();
 
   const options = {
     questionTime,
-    autoAdvance: advanceMode === 'auto',
-    shuffle:     shuffleVal === 'yes',
+    autoAdvance:  advanceMode === 'auto',
+    shuffle:      shuffleVal === 'yes',
+    maxQuestions,
   };
 
   state.socket.emit('host_create_room', { gameId: parseInt(gameId), options }, (res) => {
@@ -1576,7 +1591,8 @@ async function createRoom() {
 
     const modeLabel = res.autoAdvance ? 'Automatisch' : 'Manuell';
     const shuffleLabel = res.shuffleQuestions ? ', zufällig' : '';
-    showToast(`Raum ${res.code} erstellt! ⏱️ ${res.questionTimeSeconds}s, ${modeLabel}${shuffleLabel} 🚀`, 'success', 4500);
+    const countLabel = ` · ${res.questionCount} Fragen`;
+    showToast(`Raum ${res.code} erstellt! ⏱️ ${res.questionTimeSeconds}s, ${modeLabel}${shuffleLabel}${countLabel} 🚀`, 'success', 4500);
   });
 }
 
