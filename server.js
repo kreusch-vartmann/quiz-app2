@@ -681,6 +681,7 @@ function sendNextQuestion(room, roomCode) {
     option_c: question.option_c,
     option_d: question.option_d,
     timeSeconds: room.questionTimeSeconds,
+    endTime: room.questionStartTime + (room.questionTimeSeconds * 1000),
   };
 
   io.to(roomCode).emit('question', questionData);
@@ -772,6 +773,11 @@ io.on('connection', (socket) => {
     callback?.({ pong: true, ts: Date.now() });
   });
 
+  // ── ZEITSYNC: Client misst Round-Trip-Zeit zur Offset-Berechnung ─────────────
+  socket.on('time_sync_request', (_, callback) => {
+    callback?.({ serverTime: Date.now() });
+  });
+
   // ── SPIELER:IN: Rejoin nach Verbindungsverlust ──────────────────────────────
   socket.on('player_rejoin', ({ code, nickname }, callback) => {
     const room = rooms.get(code);
@@ -824,7 +830,8 @@ io.on('connection', (socket) => {
         });
       } else {
         // Noch nicht geantwortet -> Frage anzeigen
-        const remainingSeconds = Math.max(0, Math.round((room.questionStartTime + room.questionTimeSeconds * 1000 - Date.now()) / 1000));
+        const questionEndTime = room.questionStartTime + room.questionTimeSeconds * 1000;
+        const remainingSeconds = Math.max(0, Math.round((questionEndTime - Date.now()) / 1000));
         const questionData = {
           index: room.currentQuestionIndex,
           total: room.questions.length,
@@ -835,6 +842,7 @@ io.on('connection', (socket) => {
           option_c: question.option_c,
           option_d: question.option_d,
           timeSeconds: remainingSeconds,
+          endTime: questionEndTime,
         };
         socket.emit('question', questionData);
       }

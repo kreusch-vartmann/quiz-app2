@@ -974,6 +974,28 @@ let hostTimerInterval      = null;
 let heartbeatInterval      = null;
 let autoAdvanceCountdown   = null;
 
+// ── Zeitsynchronisation ──────────────────────────────────────────────────────
+// Schätzt die Differenz zwischen Server-Zeit und Client-Zeit (Server - Client).
+// Ein positiver Wert bedeutet, der Server läuft der Client-Zeit voraus.
+let clockOffset = 0;
+
+function syncClock(socket) {
+  const t0 = Date.now();
+  socket.emit('time_sync_request', null, (res) => {
+    if (!res?.serverTime) return;
+    const t1 = Date.now();
+    const roundTrip = t1 - t0;
+    // Annahme: Netzwerk-Latenz ist symmetrisch → Server-Zeit traf zur Mitte an
+    clockOffset = res.serverTime - (t0 + roundTrip / 2);
+    console.log(`[TimeSync] Offset: ${Math.round(clockOffset)}ms (RTT: ${roundTrip}ms)`);
+  });
+}
+
+// Gibt die geschätzte Server-Zeit zum aktuellen Moment zurück
+function serverNow() {
+  return Date.now() + clockOffset;
+}
+
 // ── Socket.io initialisieren ──────────────────────────────────────────────────
 let disconnectTimeout = null;
 
@@ -995,6 +1017,7 @@ function initSocket() {
     console.log('[Socket] Verbunden:', state.socket.id);
     if (disconnectTimeout) { clearTimeout(disconnectTimeout); disconnectTimeout = null; }
     startHeartbeat();
+    syncClock(state.socket);
   });
 
   state.socket.on('disconnect', (reason) => {
@@ -1029,7 +1052,11 @@ function initSocket() {
 
   // ── SPIELER:IN Events ─────────────────────────────────────────────────────
   state.socket.on('question', (data) => {
-    if (isHost()) return; // wird unten behandelt
+    if (isHost()) {
+      stopHostTimer();
+      showHostQuestion(data);
+      return;
+    }
     stopPlayerTimer();
     showPlayerQuestion(data);
   });
@@ -1049,8 +1076,9 @@ function initSocket() {
       showHostLeaderboard(data.leaderboard, data.isFinal, data.autoAdvance, data.autoAdvanceDelay);
       return;
     }
+    // Spieler sehen das Zwischenranking nicht – sie bleiben auf der Reveal-Ansicht.
+    // Der Timer wird gestoppt, aber die UI nicht gewechselt.
     stopPlayerTimer();
-    showPlayerLeaderboard(data.leaderboard, data.isFinal);
   });
 
   state.socket.on('game_over', (data) => {
@@ -1684,7 +1712,7 @@ function showHostQuestion(data) {
   document.getElementById('btn-host-force-next').classList.remove('hidden');
   document.getElementById('hg-status-text').textContent = `⏱️ Frage läuft… (${data.timeSeconds}s)`;
 
-  startHostTimer(data.timeSeconds);
+  startHostTimer(data.timeSeconds, data.endTime);
 }
 
 function updateAnswerCount(answered, total) {
@@ -1863,26 +1891,26 @@ function stopAutoAdvanceCountdown() {
 }
 
 // ── Host Timer ────────────────────────────────────────────────────────────────
-function startHostTimer(seconds) {
+function startHostTimer(seconds, endTime) {
   stopHostTimer();
   const circumference = 188.5; // 2π × 30
-  let remaining = seconds;
   const circle = document.getElementById('hg-timer-circle');
   const text   = document.getElementById('hg-timer-text');
 
   function update() {
-    const pct = remaining / seconds;
+    // Berechne verbleibende Zeit anhand der Server-endTime, nicht per Zähler
+    const remaining = endTime
+      ? Math.max(0, Math.ceil((endTime - serverNow()) / 1000))
+      : 0;
+    const pct = seconds > 0 ? remaining / seconds : 0;
     circle.style.strokeDashoffset = circumference * (1 - pct);
     text.textContent = remaining;
     circle.style.stroke = remaining > 10 ? '#5b7fff' : remaining > 5 ? '#f39c12' : '#e74c3c';
+    if (remaining <= 0) { stopHostTimer(); }
   }
   update();
 
-  hostTimerInterval = setInterval(() => {
-    remaining--;
-    if (remaining < 0) { stopHostTimer(); return; }
-    update();
-  }, 1000);
+  hostTimerInterval = setInterval(update, 500);
 }
 
 function stopHostTimer() {
@@ -1947,7 +1975,7 @@ function showPlayerQuestion(data) {
     </button>`).join('');
 
   showView('player-question');
-  startPlayerTimer(data.timeSeconds);
+  startPlayerTimer(data.timeSeconds, data.endTime);
 }
 
 function submitAnswer(key, text) {
@@ -2066,26 +2094,26 @@ function showPlayerGameOver(leaderboard) {
 }
 
 // ── Spieler:in Timer ──────────────────────────────────────────────────────────
-function startPlayerTimer(seconds) {
+function startPlayerTimer(seconds, endTime) {
   stopPlayerTimer();
   const circumference = 138.2; // 2π × 22
-  let remaining = seconds;
   const circle = document.getElementById('pq-timer-circle');
   const text   = document.getElementById('pq-timer-text');
 
   function update() {
-    const pct = remaining / seconds;
+    // Berechne verbleibende Zeit anhand der Server-endTime, nicht per Zähler
+    const remaining = endTime
+      ? Math.max(0, Math.ceil((endTime - serverNow()) / 1000))
+      : 0;
+    const pct = seconds > 0 ? remaining / seconds : 0;
     circle.style.strokeDashoffset = circumference * (1 - pct);
     text.textContent = remaining;
     circle.style.stroke = remaining > 10 ? '#5b7fff' : remaining > 5 ? '#f39c12' : '#e74c3c';
+    if (remaining <= 0) { stopPlayerTimer(); }
   }
   update();
 
-  playerTimerInterval = setInterval(() => {
-    remaining--;
-    if (remaining < 0) { stopPlayerTimer(); return; }
-    update();
-  }, 1000);
+  playerTimerInterval = setInterval(update, 500);
 }
 
 function stopPlayerTimer() {
