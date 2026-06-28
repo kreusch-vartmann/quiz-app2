@@ -757,11 +757,13 @@ function revealAnswer(room, roomCode, reason) {
   // ── Auto-Advance: nach Reveal automatisch zur Rangliste weiterschalten ──────
   if (room.autoAdvance) {
     if (room.autoAdvanceTimer) clearTimeout(room.autoAdvanceTimer);
+    room.autoAdvanceStartTime = Date.now();
     room.autoAdvanceTimer = setTimeout(() => {
       const currentRoom = rooms.get(roomCode);
       if (!currentRoom || currentRoom.state !== 'REVEAL') return;
       // → Leaderboard
       currentRoom.state = 'LEADERBOARD';
+      currentRoom.autoAdvanceStartTime = Date.now();
       const leaderboard = getLeaderboard(currentRoom);
       io.to(roomCode).emit('leaderboard', {
         leaderboard,
@@ -879,6 +881,7 @@ io.on('connection', (socket) => {
         answers: new Map(),
         timer: null,
         autoAdvanceTimer: null,
+        autoAdvanceStartTime: 0,
         questionStartTime: 0,
         questionTimeSeconds,
         shuffleQuestions,
@@ -1105,7 +1108,13 @@ io.on('connection', (socket) => {
     } else if (room.state === 'QUESTION_ASKED') {
       const question = room.questions[room.currentQuestionIndex];
       const questionEndTime = room.questionStartTime + room.questionTimeSeconds * 1000;
-      const remainingSeconds = Math.max(0, Math.round((questionEndTime - Date.now()) / 1000));
+      const remainingMs = Math.max(0, questionEndTime - Date.now());
+      const remainingSeconds = Math.ceil(remainingMs / 1000);
+      const connectedPlayers = Array.from(room.players.values()).filter(p => p.connected);
+      const answeredCount = room.answers.size;
+      const waitingFor = Array.from(room.players.keys()).filter(
+        nick => !room.answers.has(nick) && room.players.get(nick).connected
+      );
       socket.emit('question', {
         index: room.currentQuestionIndex,
         total: room.questions.length,
@@ -1117,19 +1126,26 @@ io.on('connection', (socket) => {
         option_d: question.option_d,
         timeSeconds: remainingSeconds,
         endTime: questionEndTime,
-        answeredCount: room.answers.size,
-        totalCount: room.players.size,
+        answeredCount,
+        totalCount: connectedPlayers.length,
+        waitingForNicknames: waitingFor,
       });
 
     } else if (room.state === 'REVEAL') {
       const revealQuestion = room.questions[room.currentQuestionIndex];
+      // Punkte dieser Frage aus questionHistory holen (letzer Eintrag = aktuelle Frage)
+      const lastHistory = room.questionHistory.length > 0
+        ? room.questionHistory[room.questionHistory.length - 1]
+        : null;
       const revealResults = {};
       room.players.forEach((pd, nick) => {
         const ad = room.answers.get(nick);
+        // Fragebezogene Punkte aus History, falls vorhanden
+        const questionPoints = lastHistory?.results?.[nick]?.points ?? 0;
         revealResults[nick] = {
           answer:     ad?.answer ?? null,
           correct:    ad?.answer === revealQuestion.correct_answer,
-          points:     pd.score,
+          points:     questionPoints,
           totalScore: pd.score,
         };
       });
@@ -1139,7 +1155,9 @@ io.on('connection', (socket) => {
         results:       revealResults,
         reason:        'rejoin',
         autoAdvance:   room.autoAdvance,
-        autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_REVEAL_DELAY : null,
+        autoAdvanceDelay: room.autoAdvance
+          ? Math.max(0, Math.ceil((room.autoAdvanceStartTime + AUTO_ADVANCE_REVEAL_DELAY * 1000 - Date.now()) / 1000))
+          : null,
       });
 
     } else if (room.state === 'LEADERBOARD') {
@@ -1148,7 +1166,9 @@ io.on('connection', (socket) => {
         leaderboard,
         isFinal: false,
         autoAdvance: room.autoAdvance,
-        autoAdvanceDelay: room.autoAdvance ? AUTO_ADVANCE_LB_DELAY : null,
+        autoAdvanceDelay: room.autoAdvance
+          ? Math.max(0, Math.ceil((room.autoAdvanceStartTime + AUTO_ADVANCE_LB_DELAY * 1000 - Date.now()) / 1000))
+          : null,
       });
 
     } else if (room.state === 'GAME_OVER') {
@@ -1359,7 +1379,7 @@ io.on('connection', (socket) => {
     const timeMs = Date.now() - room.questionStartTime;
     room.answers.set(playerNickname, { answer, timeMs });
 
-    console.log(`[Room] ${playerNickname} antwortete "${answer}" nach ${timeMs}ms`);
+    console.log(`[Room] ${playerNickname} antwortete "${answer}" nach ${timeMs}ms${!room.hostConnected ? ' (Host in Grace-Period)' : ''}`);
     callback?.({ success: true, received: true });
 
     // Alle Spieler & Host informieren über den aktuellen Antwort-Status (Sync)
