@@ -1009,6 +1009,7 @@ const state = {
   isAdmin: false,
   socket: null,
   currentView: 'start',
+  needsRejoin: false,   // true nach einem Disconnect → triggert Rejoin beim nächsten connect
   player: {
     nickname: null,
     roomCode: null,
@@ -1069,27 +1070,52 @@ function initSocket() {
     reconnectionDelay: 1000,
     reconnectionDelayMax: 5000,
     timeout: 20000,
-    // Socket.io-eigene Ping-Einstellungen (Server-seitig)
     pingInterval: 25000,
     pingTimeout: 20000,
   });
 
+  // ── Connect (initial UND nach Reconnect) ──────────────────────────────────
   state.socket.on('connect', () => {
     console.log('[Socket] Verbunden:', state.socket.id);
     if (disconnectTimeout) { clearTimeout(disconnectTimeout); disconnectTimeout = null; }
     startHeartbeat();
     syncClock(state.socket);
+
+    // Reconnect-Fall: Spielstand wiederherstellen
+    if (state.needsRejoin) {
+      state.needsRejoin = false;
+      // Host-Rejoin
+      const hostSessionId = localStorage.getItem('host_game_session_id');
+      const hostRoomCode  = localStorage.getItem('host_room_code');
+      if (hostSessionId && hostRoomCode) {
+        rejoinHost(hostSessionId, hostRoomCode);
+        return;
+      }
+      // Spieler-Rejoin
+      const savedSessionId = localStorage.getItem('player_game_session_id');
+      const savedNick      = localStorage.getItem('player_nickname');
+      const savedCode      = localStorage.getItem('player_room_code');
+      if (savedNick && savedCode) {
+        rejoinRoom(savedCode, savedNick, savedSessionId);
+      }
+    }
   });
 
+  // ── Disconnect ────────────────────────────────────────────────────────────
   state.socket.on('disconnect', (reason) => {
     console.warn('[Socket] Getrennt:', reason);
     stopHeartbeat();
-    
-    // Wenn in einem aktiven Spiel, zeige einen Reconnecting-Toast statt sofort abzubauen
+
+    // Reconnect-Flag setzen wenn wir in einem aktiven Spiel sind
+    const activeViews = ['player-lobby','player-question','player-waiting','player-reveal',
+                         'player-leaderboard','player-game-over','host-game','admin-dashboard'];
+    if (activeViews.includes(state.currentView)) {
+      state.needsRejoin = true;
+    }
+
+    // Spieler: Toast + 30s Abbruch-Timer
     if (['player-lobby','player-question','player-waiting','player-reveal','player-leaderboard'].includes(state.currentView)) {
       showToast('Verbindung unterbrochen. Versuche wiederzuverbinden… ⏳', 'warning', 4000);
-      
-      // Nach 30 Sekunden Abbruch zeigen
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
       disconnectTimeout = setTimeout(() => {
         if (!state.socket || !state.socket.connected) {
@@ -1097,8 +1123,8 @@ function initSocket() {
         }
       }, 30000);
     }
-    // Beim Host: Grace-Period läuft serverseitig, client-seitig nur Toast
-    if (['host-setup','host-game'].includes(state.currentView)) {
+    // Host: Toast + 30s Abbruch-Timer
+    if (['admin-dashboard','host-game'].includes(state.currentView)) {
       showToast('Host-Verbindung unterbrochen. Versuche wiederzuverbinden… ⏳', 'warning', 5000);
       if (disconnectTimeout) clearTimeout(disconnectTimeout);
       disconnectTimeout = setTimeout(() => {
@@ -1106,26 +1132,6 @@ function initSocket() {
           showAborted('Host-Verbindung dauerhaft verloren.');
         }
       }, 30000);
-    }
-  });
-
-  state.socket.on('reconnect', () => {
-    console.log('[Socket] Wiederverbunden.');
-    if (disconnectTimeout) { clearTimeout(disconnectTimeout); disconnectTimeout = null; }
-    startHeartbeat();
-    // Host-Rejoin prüfen (neue Keys, mit Fallback auf alte Keys)
-    const hostSessionId = localStorage.getItem('host_session_id') || localStorage.getItem('quiz_host_session_id');
-    const hostRoomCode  = localStorage.getItem('host_room_code') || localStorage.getItem('quiz_host_room_code');
-    if (hostSessionId && hostRoomCode) {
-      rejoinHost(hostSessionId, hostRoomCode);
-      return;
-    }
-    // Spieler-Rejoin prüfen (neue Keys, mit Fallback auf alte Keys)
-    const savedSessionId = localStorage.getItem('player_session_id') || localStorage.getItem('quiz_session_id');
-    const savedNick = localStorage.getItem('player_nickname') || localStorage.getItem('quiz_nickname');
-    const savedCode = localStorage.getItem('player_room_code') || localStorage.getItem('quiz_room_code');
-    if (savedNick && savedCode) {
-      rejoinRoom(savedCode, savedNick, savedSessionId);
     }
   });
 
@@ -1269,7 +1275,9 @@ function stopHeartbeat() {
 
 // ── Hilfs-Funktionen ─────────────────────────────────────────────────────────
 function isHost() {
-  return state.currentView === 'host-game';
+  // host-game: aktives Spiel; admin-dashboard mit gesetztem roomCode: Lobby-Phase
+  return state.currentView === 'host-game' ||
+    (state.currentView === 'admin-dashboard' && !!state.host.roomCode);
 }
 
 function showView(name) {
@@ -1885,11 +1893,11 @@ async function createRoom() {
     state.host.questionDuration = res.questionTimeSeconds;
 
     // Host-Session dauerhaft in localStorage speichern
-    // Spieler-Keys löschen, damit es keine Kollision beim Reload gibt
-    localStorage.removeItem('player_session_id');
+    // Player-Keys entfernen → strenge Rollentrennung im selben Browser
+    localStorage.removeItem('player_game_session_id');
     localStorage.removeItem('player_nickname');
     localStorage.removeItem('player_room_code');
-    localStorage.setItem('host_session_id', state.host.sessionId);
+    localStorage.setItem('host_game_session_id', state.host.sessionId);
     localStorage.setItem('host_room_code', res.code);
 
     document.getElementById('host-room-code').textContent = res.code;
@@ -2255,10 +2263,10 @@ function joinRoom() {
     state.player.score = 0;
 
     // Session dauerhaft in localStorage speichern (überlebt App-Wechsel / Bildschirmsperre)
-    // Host-Keys löschen, damit es keine Kollision beim Reload gibt
-    localStorage.removeItem('host_session_id');
+    // Host-Keys entfernen → strenge Rollentrennung im selben Browser
+    localStorage.removeItem('host_game_session_id');
     localStorage.removeItem('host_room_code');
-    localStorage.setItem('player_session_id', state.player.sessionId);
+    localStorage.setItem('player_game_session_id', state.player.sessionId);
     localStorage.setItem('player_nickname', res.nickname);
     localStorage.setItem('player_room_code', code);
 
@@ -2445,10 +2453,13 @@ function stopPlayerTimer() {
 // ── Spieler:in State Reset ────────────────────────────────────────────────────
 function resetPlayerState() {
   state.player = { nickname: null, roomCode: null, sessionId: null, currentAnswer: null, score: 0 };
-  localStorage.removeItem('player_session_id');
+  state.needsRejoin = false;
+  // Neue Keys
+  localStorage.removeItem('player_game_session_id');
   localStorage.removeItem('player_nickname');
   localStorage.removeItem('player_room_code');
-  // Auch alte Keys entfernen (Migration)
+  // Alte Keys (Migration)
+  localStorage.removeItem('player_session_id');
   localStorage.removeItem('quiz_session_id');
   localStorage.removeItem('quiz_nickname');
   localStorage.removeItem('quiz_room_code');
@@ -2463,9 +2474,12 @@ function resetPlayerState() {
 // ── Host State Reset ──────────────────────────────────────────────────────────
 function resetHostState() {
   state.host = { roomCode: null, sessionId: null, gameId: null, gameTitle: null, players: [], autoAdvance: false, questionDuration: 20 };
-  localStorage.removeItem('host_session_id');
+  state.needsRejoin = false;
+  // Neue Keys
+  localStorage.removeItem('host_game_session_id');
   localStorage.removeItem('host_room_code');
-  // Auch alte Keys entfernen (Migration)
+  // Alte Keys (Migration)
+  localStorage.removeItem('host_session_id');
   localStorage.removeItem('quiz_host_session_id');
   localStorage.removeItem('quiz_host_room_code');
   stopHostTimer();
@@ -2479,8 +2493,7 @@ function resetHostState() {
 // ── Rejoin-Logik für Spieler:in ───────────────────────────────────────────────
 function rejoinRoom(code, nickname, sessionId) {
   initSocket();
-  // sessionId aus localStorage falls nicht übergeben
-  const sid = sessionId || localStorage.getItem('player_session_id') || localStorage.getItem('quiz_session_id') || null;
+  const sid = sessionId || localStorage.getItem('player_game_session_id') || null;
   state.socket.emit('player_rejoin', { code, nickname, sessionId: sid }, (res) => {
     if (res.error) {
       console.warn('[Rejoin] Fehlgeschlagen:', res.error);
@@ -2513,25 +2526,22 @@ function rejoinHost(hostSessionId, roomCode) {
       return;
     }
 
-    state.host.sessionId      = hostSessionId;
-    state.host.roomCode       = res.roomCode || roomCode;
-    state.host.gameTitle      = res.gameTitle;
-    state.host.autoAdvance    = res.autoAdvance;
+    state.host.sessionId        = hostSessionId;
+    state.host.roomCode         = res.roomCode || roomCode;
+    state.host.gameTitle        = res.gameTitle;
+    state.host.autoAdvance      = res.autoAdvance;
     state.host.questionDuration = res.questionTimeSeconds;
 
-    // Host-Room-Code im DOM aktualisieren
-    const hgRoomCode = document.getElementById('hg-room-code');
-    if (hgRoomCode) hgRoomCode.textContent = state.host.roomCode;
-    const hostGameTitle = document.getElementById('host-game-title');
-    if (hostGameTitle) hostGameTitle.textContent = state.host.gameTitle || 'Quiz';
-
-    // In die richtige Ansicht wechseln
     if (res.state === 'LOBBY') {
+      // Host-Lobby ist im Admin-Dashboard → dorthin navigieren
+      showView('admin-dashboard');
+      switchTab('host');
       document.getElementById('host-room-code').textContent = state.host.roomCode;
       document.getElementById('host-lobby-section').classList.remove('hidden');
-      showView('host-setup');
     } else {
-      // Aktives Spiel: host-game View, korrekte Teilansicht kommt via Event
+      // Aktives Spiel: host-game View; korrekte Teilansicht kommt via Server-Event (question/reveal/leaderboard)
+      document.getElementById('host-game-title').textContent = state.host.gameTitle || 'Quiz';
+      document.getElementById('hg-room-code').textContent    = state.host.roomCode;
       document.getElementById('host-lobby-section').classList.add('hidden');
       resetHostGameDisplay();
       showView('host-game');
@@ -2587,16 +2597,16 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Automatisches Rejoinen beim Laden der Seite prüfen
-  // 1. Host-Rejoin hat Vorrang (neue Keys, mit Fallback auf alte Keys für Migration)
-  const savedHostSessionId = localStorage.getItem('host_session_id') || localStorage.getItem('quiz_host_session_id');
-  const savedHostRoomCode  = localStorage.getItem('host_room_code') || localStorage.getItem('quiz_host_room_code');
+  // 1. Host-Rejoin hat Vorrang
+  const savedHostSessionId = localStorage.getItem('host_game_session_id');
+  const savedHostRoomCode  = localStorage.getItem('host_room_code');
   if (savedHostSessionId && savedHostRoomCode) {
     rejoinHost(savedHostSessionId, savedHostRoomCode);
   } else {
-    // 2. Spieler:in-Rejoin (neue Keys, mit Fallback auf alte Keys für Migration)
-    const savedSessionId = localStorage.getItem('player_session_id') || localStorage.getItem('quiz_session_id');
-    const savedNick = localStorage.getItem('player_nickname') || localStorage.getItem('quiz_nickname');
-    const savedCode = localStorage.getItem('player_room_code') || localStorage.getItem('quiz_room_code');
+    // 2. Spieler:in-Rejoin
+    const savedSessionId = localStorage.getItem('player_game_session_id');
+    const savedNick      = localStorage.getItem('player_nickname');
+    const savedCode      = localStorage.getItem('player_room_code');
     if (savedNick && savedCode) {
       rejoinRoom(savedCode, savedNick, savedSessionId);
     }
